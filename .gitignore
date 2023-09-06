@@ -5,6 +5,7 @@ dcgm/
 __pycache__/
 samples/
 results/
+beit2
 
 # experimental modules
 ControlNet/
