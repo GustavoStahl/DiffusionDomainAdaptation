@@ -1,0 +1,1039 @@
+diff --git a/beit2/semantic_segmentation/backbone/beit.py b/beit2/semantic_segmentation/backbone/beit.py
+index 925dc4b..ea53afc 100644
+--- a/beit2/semantic_segmentation/backbone/beit.py
++++ b/beit2/semantic_segmentation/backbone/beit.py
+@@ -281,7 +281,7 @@ class RelativePositionBias(nn.Module):
+         return relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+ 
+ 
+-@BACKBONES.register_module()
++@BACKBONES.register_module(force=True)
+ class BEiT(nn.Module):
+     """ Vision Transformer with support for patch or hybrid CNN input stage
+     """
+diff --git a/beit2/semantic_segmentation/configs/gustavo_controlnet.py b/beit2/semantic_segmentation/configs/gustavo_controlnet.py
+new file mode 100644
+index 0000000..291035d
+--- /dev/null
++++ b/beit2/semantic_segmentation/configs/gustavo_controlnet.py
+@@ -0,0 +1,156 @@
++# --------------------------------------------------------
++# BEIT: BERT Pre-Training of Image Transformers (https://arxiv.org/abs/2106.08254)
++# Github source: https://github.com/microsoft/unilm/tree/master/beit
++# Copyright (c) 2021 Microsoft
++# Licensed under The MIT License [see LICENSE for details]
++# By Hangbo Bao
++# Based on timm, mmseg, setr, xcit and swin code bases
++# https://github.com/rwightman/pytorch-image-models/tree/master/timm
++# https://github.com/fudan-zvg/SETR
++# https://github.com/facebookresearch/xcit/
++# https://github.com/microsoft/Swin-Transformer
++# --------------------------------------------------------'
++
++_base_ = [
++    '_base_/models/upernet_beit.py',
++]
++
++###########################################################################################
++############################## based on ade20k.py #########################################
++
++# img_norm_cfg_lab = dict(
++#     mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
++# img_norm_cfg_syn = dict(
++#     mean=[100.07768646,  96.87966971,  92.77555987], std=[75.55619586, 74.82331901, 74.95360391], to_rgb=True)
++
++crop_size = (224,224)
++
++# https://mmsegmentation.readthedocs.io/en/latest/api.html
++train_pipeline = [
++    dict(type='LoadImageFromFile'),
++    dict(type='LoadAnnotations'),
++    dict(type='RandomFlip', prob=0.0),
++    dict(type='Normalize', mean=[0.0, 0.0, 0.0], std=[255.0, 255.0, 255.0], to_rgb=True),
++    dict(type='DefaultFormatBundle'),
++    dict(type='Collect', keys=['img', 'gt_semantic_seg']),
++]
++
++test_pipeline = [
++    dict(type='LoadImageFromFile'),
++    dict(type='LoadAnnotations'),
++    dict(type='RandomFlip', prob=0.0),
++    dict(type='Normalize', mean=[0.0, 0.0, 0.0], std=[255.0, 255.0, 255.0], to_rgb=True),
++    dict(type='DefaultFormatBundle'),
++    dict(type='Collect', keys=['img', 'gt_semantic_seg']),
++]
++
++data = dict(
++    samples_per_gpu=4,
++    workers_per_gpu=4,
++    train=dict(
++        type="WinLab",
++        data_root='/ibex/user/stahlg/datasets/winlab_1',
++        split='1024.txt', # overwritten in train.py
++        img_dir='rgb',
++        ann_dir='labels',
++        pipeline=train_pipeline),
++    test=dict(
++        type="WinLab",
++        data_root='/ibex/user/stahlg/datasets/winlab_1',
++        split="val_200.txt", # overwritten in train.py
++        img_dir='rgb',
++        ann_dir='labels',
++        pipeline=test_pipeline))
++
++###########################################################################################
++############################## default_runtime.py #########################################
++
++# yapf:disable
++log_config = dict(
++    interval=50,
++    hooks=[
++        dict(type='TextLoggerHook', by_epoch=False),
++        # dict(type='TensorboardLoggerHook')
++    ])
++# yapf:enable
++dist_params = dict(backend='nccl')
++log_level = 'INFO'
++load_from = None
++resume_from = None
++workflow = [('train', 1)]
++cudnn_benchmark = True
++
++###########################################################################################
++################################# schedule_160k.py ########################################
++
++# optimizer
++optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0005)
++optimizer_config = dict()
++# learning policy
++lr_config = dict(policy='poly', power=0.9, min_lr=1e-4, by_epoch=False)
++# runtime settings
++runner = dict(type='IterBasedRunnerAmp', max_iters=60000)
++
++eval_iters = 4000
++checkpoint_config = dict(by_epoch=False, interval=-1) # let's try without every checkpoint...?!
++evaluation = dict(interval=eval_iters, metric='mIoU')
++
++
++###########################################################################################
++############ based on upernet_beit_base_12_512_slide_160k_21ktoade20k.py ##################
++
++crop_size = (224, 224)
++
++model = dict(
++    backbone=dict(
++        type='BEiT',
++        img_size=224,
++        patch_size=16,
++        embed_dim=768,
++        depth=12,
++        num_heads=12,
++        mlp_ratio=4,
++        qkv_bias=True,
++        use_abs_pos_emb=False,
++        use_rel_pos_bias=True,
++        init_values=0.1,
++        drop_path_rate=0.15,
++#        rel_pos_bias_interpolation_type=0,
++        out_indices=[3, 5, 7, 11]
++    ),
++    decode_head=dict(
++        in_channels=[768, 768, 768, 768],
++        num_classes=12,
++        channels=768,
++    ),
++    auxiliary_head=dict(
++        in_channels=768,
++        num_classes=12
++    ), 
++    test_cfg = dict(mode='slide', crop_size=crop_size, stride=(341, 341))
++)
++
++optimizer = dict(type='AdamW', lr=5e-5, betas=(0.9, 0.999), weight_decay=0.05,
++                 constructor='LayerDecayOptimizerConstructor', 
++                 paramwise_cfg=dict(num_layers=12, layer_decay_rate=0.85))
++
++lr_config = dict(policy='poly',
++                 warmup='linear',
++                 warmup_iters=1500,
++                 warmup_ratio=1e-6,
++                 power=1.0, min_lr=0.0, by_epoch=False)
++
++# By default, models are trained on 8 GPUs with 2 images per GPU
++# data=dict(samples_per_gpu=2)
++data["samples_per_gpu"] = 2
++
++# do not use mmdet version fp16
++fp16 = None
++optimizer_config = dict(
++    type="DistOptimizerHook",
++    update_interval=1,
++    grad_clip=None,
++    coalesce=True,
++    bucket_size_mb=-1,
++    use_fp16=True,
++)
+diff --git a/beit2/semantic_segmentation/configs/gustavo_sign.py b/beit2/semantic_segmentation/configs/gustavo_sign.py
+new file mode 100644
+index 0000000..cfdc814
+--- /dev/null
++++ b/beit2/semantic_segmentation/configs/gustavo_sign.py
+@@ -0,0 +1,176 @@
++# --------------------------------------------------------
++# BEIT: BERT Pre-Training of Image Transformers (https://arxiv.org/abs/2106.08254)
++# Github source: https://github.com/microsoft/unilm/tree/master/beit
++# Copyright (c) 2021 Microsoft
++# Licensed under The MIT License [see LICENSE for details]
++# By Hangbo Bao
++# Based on timm, mmseg, setr, xcit and swin code bases
++# https://github.com/rwightman/pytorch-image-models/tree/master/timm
++# https://github.com/fudan-zvg/SETR
++# https://github.com/facebookresearch/xcit/
++# https://github.com/microsoft/Swin-Transformer
++# --------------------------------------------------------'
++
++_base_ = [
++    '_base_/models/upernet_beit.py',
++]
++
++###########################################################################################
++############################## based on ade20k.py #########################################
++
++
++img_norm_cfg_lab = dict(
++    mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True)
++
++img_norm_cfg_syn_sign = dict(
++    mean=[100.07768646,  96.87966971,  92.77555987], std=[75.55619586, 74.82331901, 74.95360391],  to_rgb=True)
++
++crop_size = (224,224)
++
++# https://mmsegmentation.readthedocs.io/en/latest/api.html
++train_pipeline = [
++    dict(type='LoadImageFromFile'),
++    dict(type='LoadAnnotations'),
++    dict(type='Resize', img_scale=(512, 512), ratio_range=(0.75, 1.33)),
++    dict(type='RandomCrop', crop_size=crop_size, cat_max_ratio=0.75),
++    dict(type='RandomFlip', prob=0.5, direction='horizontal'),
++    dict(type='PhotoMetricDistortion'),
++    dict(type='Normalize', **img_norm_cfg_syn_sign),
++    dict(type='Pad', size=crop_size, pad_val=0, seg_pad_val=0),
++    dict(type='DefaultFormatBundle'),
++    dict(type='Collect', keys=['img', 'gt_semantic_seg']),
++]
++test_pipeline = [
++    dict(type='LoadImageFromFile'),
++    dict(
++        type='MultiScaleFlipAug',
++        img_scale=(244, 244),
++        # img_ratios=[0.5, 0.75, 1.0, 1.25, 1.5, 1.75],
++        flip=False,
++        transforms=[
++            dict(type='Resize', keep_ratio=True),
++            dict(type='RandomFlip'),
++            dict(type='Normalize', **img_norm_cfg_lab),
++            dict(type='ImageToTensor', keys=['img']),
++            dict(type='Collect', keys=['img']),
++        ])
++]
++
++data = dict(
++    samples_per_gpu=2,
++    workers_per_gpu=4,
++    train=dict(
++        type="SynWin",
++        data_root='/ibex/user/stahlg/datasets/winsyn_sign/stable_diffusion',
++        img_dir='1024_in/rgb',
++        split='does_not_exist',
++        ann_dir='labels_8bit',
++        pipeline=train_pipeline),
++    val=dict(
++        type="WinLab",
++        data_root='/ibex/user/stahlg/datasets/winlab_1/stable_diffusion',
++        img_dir='last_1k_in/rgb',
++        split='val_200.txt',
++        ann_dir='labels',
++        pipeline=test_pipeline),
++     test=dict(
++         type="WinLab",
++         data_root='/ibex/user/stahlg/datasets/winlab_1/stable_diffusion',
++         img_dir='last_1k_in/rgb',
++         split='last_1k.txt',
++         ann_dir='labels',
++         pipeline=test_pipeline)
++)
++
++###########################################################################################
++############################## default_runtime.py #########################################
++
++# yapf:disable
++log_config = dict(
++    interval=50,
++    hooks=[
++        dict(type='TextLoggerHook', by_epoch=False),
++        # dict(type='TensorboardLoggerHook')
++    ])
++# yapf:enable
++dist_params = dict(backend='nccl')
++log_level = 'INFO'
++load_from = None
++resume_from = None
++workflow = [('train', 1)]
++cudnn_benchmark = True
++
++###########################################################################################
++################################# schedule_160k.py ########################################
++
++# optimizer
++optimizer = dict(type='SGD', lr=0.01, momentum=0.9, weight_decay=0.0005)
++optimizer_config = dict()
++# learning policy
++lr_config = dict(policy='poly', power=0.9, min_lr=1e-4, by_epoch=False)
++# runtime settings
++runner = dict(type='IterBasedRunnerAmp', max_iters=60000)
++
++eval_iters = 4000
++checkpoint_config = dict(by_epoch=False, interval=-1)
++evaluation = dict(interval=eval_iters, metric='mIoU')
++
++
++###########################################################################################
++############ based on upernet_beit_base_12_512_slide_160k_21ktoade20k.py ##################
++
++crop_size = (224, 224)
++
++model = dict(
++    backbone=dict(
++        type='BEiT',
++        img_size=224,
++        patch_size=16,
++        embed_dim=768,
++        depth=12,
++        num_heads=12,
++        mlp_ratio=4,
++        qkv_bias=True,
++        use_abs_pos_emb=False,
++        use_rel_pos_bias=True,
++        init_values=0.1,
++        drop_path_rate=0.15,
++#        rel_pos_bias_interpolation_type=0,
++        out_indices=[3, 5, 7, 11]
++    ),
++    decode_head=dict(
++        in_channels=[768, 768, 768, 768],
++        num_classes=12,
++        channels=768,
++    ),
++    auxiliary_head=dict(
++        in_channels=768,
++        num_classes=12
++    ), 
++    test_cfg = dict(mode='slide', crop_size=crop_size, stride=(341, 341))
++)
++
++optimizer = dict(type='AdamW', lr=5e-5, betas=(0.9, 0.999), weight_decay=0.05,
++                 constructor='LayerDecayOptimizerConstructor', 
++                 paramwise_cfg=dict(num_layers=12, layer_decay_rate=0.85))
++
++lr_config = dict(policy='poly',
++                 warmup='linear',
++                 warmup_iters=1500,
++                 warmup_ratio=1e-6,
++                 power=1.0, min_lr=0.0, by_epoch=False)
++
++# By default, models are trained on 8 GPUs with 2 images per GPU
++# data=dict(samples_per_gpu=2)
++# data["samples_per_gpu"] = 2
++
++# do not use mmdet version fp16
++fp16 = None
++optimizer_config = dict(
++    type="DistOptimizerHook",
++    update_interval=1,
++    grad_clip=None,
++    coalesce=True,
++    bucket_size_mb=-1,
++    use_fp16=True,
++)
+diff --git a/beit2/semantic_segmentation/datasets/synwin.py b/beit2/semantic_segmentation/datasets/synwin.py
+new file mode 100644
+index 0000000..f99b454
+--- /dev/null
++++ b/beit2/semantic_segmentation/datasets/synwin.py
+@@ -0,0 +1,11 @@
++from mmseg.datasets.builder import DATASETS
++
++from datasets.win_template import WinTemplate
++
++@DATASETS.register_module()
++class SynWin(WinTemplate):
++
++    def __init__(self, **kwargs):
++        super(SynWin, self).__init__(
++            img_suffix='.png',
++            **kwargs)
+\ No newline at end of file
+diff --git a/beit2/semantic_segmentation/datasets/win_template.py b/beit2/semantic_segmentation/datasets/win_template.py
+new file mode 100644
+index 0000000..8c70faa
+--- /dev/null
++++ b/beit2/semantic_segmentation/datasets/win_template.py
+@@ -0,0 +1,165 @@
++import os
++
++from mmseg.datasets.custom import CustomDataset
++import os
++from functools import reduce
++
++import mmcv
++import numpy as np
++from mmcv.utils import print_log
++from terminaltables import AsciiTable
++
++from mmseg.core import eval_metrics
++from mmseg.datasets.builder import DATASETS
++
++
++@DATASETS.register_module()
++class WinTemplate(CustomDataset):
++    CLASSES = ("none", "window pane", "window frame", "open-window", "wall frame", "wall", "door", "shutter", "blind", "bars", "balcony", "misc object")
++
++    # pretty colours
++    PALETTE = [[255, 255, 255],
++               [135, 170, 222],
++               [255, 128, 128],
++               [0, 0, 0],
++               [233, 175, 198],
++               [204, 204, 204],
++               [164, 120, 192],
++               [255, 153, 85],
++               [255, 230, 128],
++               [110, 110, 110],
++               [222, 170, 135],
++               [174, 233, 174]]
++
++    def __init__(self, **kwargs):
++        super(WinTemplate, self).__init__(
++            #img_suffix='.jpg', leave to subclasses
++            seg_map_suffix='.png',
++            reduce_zero_label=False,
++            ignore_index=0,
++            **kwargs)
++
++    def evaluate(self,
++                 results,
++                 metric='mIoU',
++                 logger=None,
++                 efficient_test=False,
++                 per_datum=False,
++                 **kwargs):
++        """Evaluate the dataset.
++
++        Args:
++            results (list): Testing results of the dataset.
++            metric (str | list[str]): Metrics to be evaluated. 'mIoU' and
++                'mDice' are supported.
++            logger (logging.Logger | None | str): Logger used for printing
++                related information during evaluation. Default: None.
++
++        Returns:
++            dict[str, float]: Default metrics.
++        """
++
++        if isinstance(metric, str):
++            metric = [metric]
++        allowed_metrics = ['mIoU', 'mDice']
++        if not set(metric).issubset(set(allowed_metrics)):
++            raise KeyError('metric {} is not supported'.format(metric))
++        eval_results = {}
++        gt_seg_maps = self.get_gt_seg_maps(efficient_test)
++        if self.CLASSES is None:
++            num_classes = len(
++                reduce(np.union1d, [np.unique(_) for _ in gt_seg_maps]))
++        else:
++            num_classes = len(self.CLASSES)
++        ret_metrics = eval_metrics(
++            results,
++            gt_seg_maps,
++            num_classes,
++            self.ignore_index,
++            metric,
++            label_map=self.label_map,
++            reduce_zero_label=self.reduce_zero_label)
++        
++        #! [begin] testing counting mislabels
++        # mislabels_per_class = np.zeros((num_classes, num_classes), dtype=np.int)
++
++        # # Iterate over the predicted and ground truth masks
++        # for pred_mask, gt_mask in zip(results, gt_seg_maps):
++        #     # Flatten the masks
++        #     pred_mask_flat = pred_mask.flatten()
++        #     gt_mask_flat = gt_mask.flatten()
++
++        #     # Count mislabels per class
++        #     for i in range(num_classes):
++        #         for j in range(num_classes):
++        #             # if i == j: 
++        #             #     continue
++        #             # gt_mask_equals_class = (gt_mask_flat == j)
++        #             # gt_mask_equals_class_sum = np.sum(gt_mask_equals_class)
++        #             # score = np.sum((pred_mask_flat == i) & gt_mask_equals_class)
++        #             mislabels_per_class[i, j] += np.sum((pred_mask_flat == i) & (gt_mask_flat == j))
++        # for i in range(num_classes):
++        #     for j in range(num_classes):
++        #         print(f"Class {i} labeled as class {j}: {mislabels_per_class[i, j]}")                    
++        #! [end] testing counting mislabels                    
++        
++        #! hardcoded. Removing 0.0 score for the classe "none"
++        ret_metrics[-1][0] = np.nan
++
++        if per_datum:
++            miou5_per_datum = []
++            for i in range(len(results)):
++                ret_metrics = eval_metrics(
++                    [results[i]],
++                    [gt_seg_maps[i]],
++                    num_classes,
++                    self.ignore_index,
++                    metric,
++                    label_map=self.label_map,
++                    reduce_zero_label=self.reduce_zero_label)
++
++                miou5_per_datum.append ( np.nanmean(ret_metrics[2][1:6]) )
++
++
++        class_table_data = [['Class'] + [m[1:] for m in metric] + ['Acc']]
++        if self.CLASSES is None:
++            class_names = tuple(range(num_classes))
++        else:
++            class_names = self.CLASSES
++        ret_metrics_round = [
++            np.round(ret_metric * 100, 2) for ret_metric in ret_metrics
++        ]
++        for i in range(num_classes):
++            class_table_data.append([class_names[i]] +
++                                    [m[i] for m in ret_metrics_round[2:]] +
++                                    [ret_metrics_round[1][i]])
++        summary_table_data = [['Scope'] +
++                              ['m' + head
++                               for head in class_table_data[0][1:]] + ['aAcc']]
++        
++        ret_metrics_mean = [
++            np.round(np.nanmean(ret_metric) * 100, 2)
++            for ret_metric in ret_metrics
++        ]
++        summary_table_data.append(['global'] + ret_metrics_mean[2:] +
++                                  [ret_metrics_mean[1]] +
++                                  [ret_metrics_mean[0]])
++        print_log('per class results:', logger)
++        table = AsciiTable(class_table_data)
++        print_log('\n' + table.table, logger=logger)
++        print_log('Summary:', logger)
++        table = AsciiTable(summary_table_data)
++        print_log('\n' + table.table, logger=logger)
++
++        for i in range(1, len(summary_table_data[0])):
++            eval_results[summary_table_data[0]
++            [i]] = summary_table_data[1][i] / 100.0
++        if mmcv.is_list_of(results, str):
++            for file_name in results:
++                os.remove(file_name)
++
++        eval_results["full-table"] = ret_metrics # bodge stats on, so I can process them in test_many
++        if per_datum:
++            eval_results["miou5-per"] = miou5_per_datum
++
++        return eval_results
+diff --git a/beit2/semantic_segmentation/datasets/winlab.py b/beit2/semantic_segmentation/datasets/winlab.py
+new file mode 100644
+index 0000000..b9285f5
+--- /dev/null
++++ b/beit2/semantic_segmentation/datasets/winlab.py
+@@ -0,0 +1,12 @@
++
++from mmseg.datasets.builder import DATASETS
++
++from datasets.win_template import WinTemplate
++
++@DATASETS.register_module()
++class WinLab(WinTemplate):
++
++    def __init__(self, **kwargs):
++        super(WinLab, self).__init__(
++            img_suffix='.jpg',
++            **kwargs)
+diff --git a/beit2/semantic_segmentation/mmcv_custom/__init__.py b/beit2/semantic_segmentation/mmcv_custom/__init__.py
+index 0e717c0..2c1ac93 100644
+--- a/beit2/semantic_segmentation/mmcv_custom/__init__.py
++++ b/beit2/semantic_segmentation/mmcv_custom/__init__.py
+@@ -6,4 +6,4 @@ from .resize_transform import SETR_Resize
+ from .apex_runner.optimizer import DistOptimizerHook
+ from .train_api import train_segmentor
+ 
+-__all__ = ['load_checkpoint', 'LayerDecayOptimizerConstructor', 'SETR_Resize', 'DistOptimizerHook', 'train_segmentor']
++__all__ = ['load_checkpoint', 'LayerDecayOptimizerConstructor', 'SETR_Resize', 'DistOptimizerHook', 'train_segmentor', 'save_best_eval_hook']
+diff --git a/beit2/semantic_segmentation/mmcv_custom/save_best_eval_hook.py b/beit2/semantic_segmentation/mmcv_custom/save_best_eval_hook.py
+new file mode 100644
+index 0000000..12e3551
+--- /dev/null
++++ b/beit2/semantic_segmentation/mmcv_custom/save_best_eval_hook.py
+@@ -0,0 +1,48 @@
++import os.path as osp
++import sys
++
++from mmcv.runner import Hook
++from torch.utils.data import DataLoader
++
++
++class SaveBestEvalHook(Hook):
++
++    def __init__(self,
++                 dataloader,
++                 work_dir,
++                 interval=1,
++                 gpu_collect=False,
++                 by_epoch=False,
++                 **eval_kwargs):
++
++        if not isinstance(dataloader, DataLoader):
++            raise TypeError(
++                'dataloader must be a pytorch DataLoader, but got {}'.format(
++                    type(dataloader)))
++        self.dataloader = dataloader
++        self.interval = interval
++        self.gpu_collect = gpu_collect
++        self.by_epoch = by_epoch
++        self.eval_kwargs = eval_kwargs
++        self.work_dir = work_dir
++        self.best_miou = -1
++
++    def after_train_iter(self, runner):
++
++        if runner.rank != 0 or self.by_epoch or not self.every_n_iters(runner, self.interval):
++            return
++
++        m = runner.log_buffer.output["mIoU"]
++
++        if m > self.best_miou: # won't work on restart!
++
++            self.best_miou = m
++
++            runner.logger.info( f'Saving best checkpoint...')
++
++            runner.save_checkpoint(
++                runner.work_dir,
++                filename_tmpl="best.pth",
++                create_symlink=False)
++
++            runner.logger.info( f'...done')
+diff --git a/beit2/semantic_segmentation/mmcv_custom/train_api.py b/beit2/semantic_segmentation/mmcv_custom/train_api.py
+index 1b67423..887ecdc 100644
+--- a/beit2/semantic_segmentation/mmcv_custom/train_api.py
++++ b/beit2/semantic_segmentation/mmcv_custom/train_api.py
+@@ -3,9 +3,14 @@ import warnings
+ 
+ import numpy as np
+ import torch
++
++from . import save_best_eval_hook
++
+ from mmcv.parallel import MMDataParallel, MMDistributedDataParallel
+ from mmcv.runner import build_optimizer, build_runner
+ 
++from mmcv.utils import env
++
+ from mmseg.core import DistEvalHook, EvalHook
+ from mmseg.datasets import build_dataloader, build_dataset
+ from mmseg.utils import get_root_logger
+@@ -41,6 +46,9 @@ def train_segmentor(model,
+                     validate=False,
+                     timestamp=None,
+                     meta=None):
++
++    print("************* one", torch.tensor([1.0, 2.0]).cuda() )
++
+     """Launch segmentor training."""
+     logger = get_root_logger(cfg.log_level)
+ 
+@@ -58,9 +66,14 @@ def train_segmentor(model,
+             drop_last=True) for ds in dataset
+     ]
+ 
++    print ("********************** two")
++
+     # build optimizer
+     optimizer = build_optimizer(model, cfg.optimizer)
+ 
++    print ("********************** two.1")
++
++
+     # use apex fp16 optimizer
+     if cfg.optimizer_config.get("type", None) and cfg.optimizer_config["type"] == "DistOptimizerHook":
+         if cfg.optimizer_config.get("use_fp16", False):
+@@ -70,26 +83,40 @@ def train_segmentor(model,
+                 if hasattr(m, "fp16_enabled"):
+                     m.fp16_enabled = True
+ 
++    print ("********************** two.2", distributed)
++
++    print("model.cuda", model.cuda())
++    print("current_device", torch.cuda.current_device())
++    print("tocher.ver.cud", torch.version.cuda)
++    print ( env.collect_env() )
++
+     # put model on gpus
+     if distributed:
+         find_unused_parameters = cfg.get('find_unused_parameters', False)
+         # Sets the `find_unused_parameters` parameter in
+         # torch.nn.parallel.DistributedDataParallel
++
+         model = MMDistributedDataParallel(
+             model.cuda(),
+             device_ids=[torch.cuda.current_device()],
+             broadcast_buffers=False,
+             find_unused_parameters=find_unused_parameters)
++
++        print ("two.3")
+     else:
+         model = MMDataParallel(
+             model.cuda(cfg.gpu_ids[0]), device_ids=cfg.gpu_ids)
+ 
++    print ("********************** two.4")
++
+     if cfg.get('runner') is None:
+         cfg.runner = {'type': 'IterBasedRunner', 'max_iters': cfg.total_iters}
+         warnings.warn(
+             'config is now expected to have a `runner` section, '
+             'please set `runner` in your config.', UserWarning)
+ 
++    print ("********************** three")
++
+     runner = build_runner(
+         cfg.runner,
+         default_args=dict(
+@@ -100,6 +127,9 @@ def train_segmentor(model,
+             logger=logger,
+             meta=meta))
+ 
++    print ("********************** four")
++
++
+     # register hooks
+     runner.register_training_hooks(cfg.lr_config, cfg.optimizer_config,
+                                    cfg.checkpoint_config, cfg.log_config,
+@@ -122,8 +152,16 @@ def train_segmentor(model,
+         eval_hook = DistEvalHook if distributed else EvalHook
+         runner.register_hook(eval_hook(val_dataloader, **eval_cfg))
+ 
++        save_best = save_best_eval_hook.SaveBestEvalHook( val_dataloader, cfg.work_dir, **eval_cfg )
++        runner.register_hook(save_best)
++
+     if cfg.resume_from:
+         runner.resume(cfg.resume_from)
+     elif cfg.load_from:
+         runner.load_checkpoint(cfg.load_from)
++
++    print ("********************** five", torch.tensor([1.0, 2.0]).cuda() )
++
+     runner.run(data_loaders, cfg.workflow)
++
++    print ("********************** six")
+diff --git a/beit2/semantic_segmentation/tools/mask_distribution.py b/beit2/semantic_segmentation/tools/mask_distribution.py
+new file mode 100644
+index 0000000..4a893a8
+--- /dev/null
++++ b/beit2/semantic_segmentation/tools/mask_distribution.py
+@@ -0,0 +1,56 @@
++from glob import glob
++import os
++import sys
++import cv2
++import numpy as np
++from tqdm import tqdm
++import matplotlib.pyplot as plt
++
++from datasets.win_template import WinTemplate 
++
++if __name__ == "__main__":
++    
++    dataset_path = sys.argv[1]
++    
++    filenames = None
++    if os.path.isfile(dataset_path):
++        basedir = os.path.dirname(dataset_path)
++        with open(dataset_path, 'r') as f:
++            filenames = [os.path.join(basedir, "labels", f"{line.rstrip()}.png") for line in f.readlines()]
++            
++    elif os.path.isdir(dataset_path):
++        filenames = sorted(glob(os.path.join(dataset_path, "labels", "*.png")))
++        
++    else:
++        sys.exit("Invalid param")
++            
++    masks_accum_dict = {class_name : np.zeros((512,512), dtype=int) for class_name in WinTemplate.CLASSES}
++    for filename in tqdm(filenames):
++        image = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
++        unique_indexes = np.unique(image)
++        
++        for index in unique_indexes:
++            class_name = WinTemplate.CLASSES[index]
++            masks_accum_dict[class_name] += (image == index).astype(int)
++            
++    fig, axs = plt.subplots(3, 4, figsize=(12, 8))
++    for i, (class_name, mask_accum) in enumerate(masks_accum_dict.items()):
++        row = i // 4  # Determine the row index
++        col = i % 4   # Determine the column index
++        
++        min_val, max_val, *_ = cv2.minMaxLoc(mask_accum)
++        mask_accum_norm = (mask_accum - min_val)/(max_val - min_val + 1e-6)
++
++        # Plot the histogram in the  corresponding subplot
++        axs[row, col].matshow(mask_accum_norm)
++        axs[row, col].set_title(class_name)  # Set the subplot title
++
++    # Add overall figure title
++    fig.suptitle("Mask distribution")
++
++    # Adjust spacing between subplots
++    fig.tight_layout()
++
++    # Show the plot
++    plt.show()        
++        
+\ No newline at end of file
+diff --git a/beit2/semantic_segmentation/tools/mean_and_std.py b/beit2/semantic_segmentation/tools/mean_and_std.py
+new file mode 100644
+index 0000000..04c99d1
+--- /dev/null
++++ b/beit2/semantic_segmentation/tools/mean_and_std.py
+@@ -0,0 +1,49 @@
++import argparse, os, cv2
++import numpy as np
++from glob import glob
++from tqdm import tqdm
++
++def get_args():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("-d", "--dataset", required=True, type=str,
++                        help="Path to the dataset image folder.")
++    parser.add_argument("-s", "--split", required=False, type=str,
++                        help="Path to split file.")    
++    return parser.parse_args()
++
++def main():
++    """ Compute mean and std using the Sum of Squares Formula Shortcut """
++    args = get_args()
++    
++    exts = ["png", "jpg", "jpeg", "tif"]
++    image_paths = []
++    if args.split:
++        with open(args.split) as f:
++            for filename in f.readlines():
++                filename = filename.rstrip()
++                for ext in exts:
++                    filepath = os.path.join(args.dataset, f"{filename}.{ext}")
++                    if os.path.exists(filepath):
++                        image_paths.append(filepath)
++    else:
++        image_paths = [path for ext in exts for path in glob(os.path.join(args.dataset, f"*.{ext}"))]
++        
++    image = None
++    psum = np.zeros(3, dtype=int)
++    psum_sq = np.zeros(3, dtype=int)
++    for image_path in tqdm(image_paths, ncols=80):
++        image = cv2.imread(image_path, cv2.IMREAD_COLOR).astype(int)
++        psum += image.sum(axis=(0,1))
++        psum_sq += np.power(image, 2).sum(axis=(0,1))
++        
++    pixel_count = len(image_paths) * image.shape[0] * image.shape[1]
++    
++    total_mean = psum / pixel_count
++    total_var  = (psum_sq / pixel_count) - np.power(total_mean, 2)
++    total_std  = np.sqrt(total_var)
++        
++    print(f"[RGB] Mean: {repr(total_mean[::-1])}", f"Std: {repr(total_std[::-1])}")
++        
++
++if __name__ == "__main__":
++    main()
+\ No newline at end of file
+diff --git a/beit2/semantic_segmentation/tools/openmm_utils.py b/beit2/semantic_segmentation/tools/openmm_utils.py
+new file mode 100644
+index 0000000..70be0e6
+--- /dev/null
++++ b/beit2/semantic_segmentation/tools/openmm_utils.py
+@@ -0,0 +1,56 @@
++import torch
++
++from mmcv import Config
++from mmcv.parallel import MMDataParallel
++from mmcv.runner import load_checkpoint
++
++from mmseg.datasets import build_dataloader, build_dataset
++from mmseg.models import build_segmentor
++
++# required imports to register as modules to MMSeg
++from datasets.winlab import WinLab
++from datasets.synwin import SynWin
++from backbone import beit
++
++#NOTE: add force=True to @BACKBONES.register_module in BEiT's class
++#NOTE: OpenMM libraries: mim install mmcv-full==1.6.0 mmsegmentation==0.27, verify torch dependencies
++
++def get_model(cfg_path, ckpt_path, is_frozen=True):
++    cfg = Config.fromfile(cfg_path)
++    
++    # set cudnn_benchmark, useful when image size doesn't vary
++    if cfg.get('cudnn_benchmark', False):
++        torch.backends.cudnn.benchmark = True
++        
++    cfg.model.pretrained = None
++    
++    # build the model and load checkpoint
++    cfg.model.train_cfg = None
++    model = build_segmentor(cfg.model, test_cfg=cfg.get('test_cfg'))
++    checkpoint = load_checkpoint(model, ckpt_path) #, map_location='cpu')
++    model.CLASSES = WinLab.CLASSES
++    model.PALETTE = WinLab.PALETTE
++    model.cfg = cfg
++
++    model = MMDataParallel(model, device_ids=[0])
++    model.eval()
++
++    return model
++
++def get_dataloader(cfg_path, split="train", batch_size=None):
++    cfg = Config.fromfile(cfg_path)
++    
++    if batch_size is not None:
++        cfg.data.samples_per_gpu = batch_size
++    
++    # cfg.data.test.test_mode = True
++    
++    # build the dataloader
++    dataset = build_dataset(cfg.data[split])
++    data_loader = build_dataloader(
++        dataset,
++        samples_per_gpu=cfg.data.samples_per_gpu,
++        workers_per_gpu=cfg.data.workers_per_gpu,
++        shuffle=False)
++    
++    return data_loader
+diff --git a/beit2/semantic_segmentation/tools/test.py b/beit2/semantic_segmentation/tools/test.py
+index b239e9d..dbaa259 100644
+--- a/beit2/semantic_segmentation/tools/test.py
++++ b/beit2/semantic_segmentation/tools/test.py
+@@ -13,6 +13,8 @@ from mmseg.models import build_segmentor
+ 
+ from backbone import beit
+ 
++from datasets.synwin import SynWin
++from datasets.winlab import WinLab
+ 
+ def parse_args():
+     parser = argparse.ArgumentParser(
+@@ -67,17 +69,17 @@ def parse_args():
+ def main():
+     args = parse_args()
+ 
+-    assert args.out or args.eval or args.format_only or args.show \
+-        or args.show_dir, \
+-        ('Please specify at least one operation (save/eval/format/show the '
+-         'results / save the results) with the argument "--out", "--eval"'
+-         ', "--format-only", "--show" or "--show-dir"')
++    # assert args.out or args.eval or args.format_only or args.show \
++    #     or args.show_dir, \
++    #     ('Please specify at least one operation (save/eval/format/show the '
++    #      'results / save the results) with the argument "--out", "--eval"'
++    #      ', "--format-only", "--show" or "--show-dir"')
+ 
+-    if args.eval and args.format_only:
+-        raise ValueError('--eval and --format_only cannot be both specified')
++    # if args.eval and args.format_only:
++    #     raise ValueError('--eval and --format_only cannot be both specified')
+ 
+-    if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
+-        raise ValueError('The output file must be a pkl file.')
++    # if args.out is not None and not args.out.endswith(('.pkl', '.pickle')):
++    #     raise ValueError('The output file must be a pkl file.')
+ 
+     cfg = mmcv.Config.fromfile(args.config)
+     if args.options is not None:
+@@ -115,8 +117,9 @@ def main():
+     cfg.model.train_cfg = None
+     model = build_segmentor(cfg.model, test_cfg=cfg.get('test_cfg'))
+     checkpoint = load_checkpoint(model, args.checkpoint, map_location='cpu')
++    # import pdb; pdb.set_trace()
+     model.CLASSES = checkpoint['meta']['CLASSES']
+-    model.PALETTE = checkpoint['meta']['PALETTE']
++    model.PALETTE = WinLab.PALETTE # checkpoint['meta']['PALETTE']
+ 
+     efficient_test = False
+     if args.eval_options is not None:
+diff --git a/beit2/semantic_segmentation/tools/train.py b/beit2/semantic_segmentation/tools/train.py
+index ae0aaed..1012559 100644
+--- a/beit2/semantic_segmentation/tools/train.py
++++ b/beit2/semantic_segmentation/tools/train.py
+@@ -19,6 +19,8 @@ from mmseg.utils import collect_env, get_root_logger
+ 
+ from backbone import beit
+ 
++from datasets.synwin import SynWin
++from datasets.winlab import WinLab
+ 
+ def parse_args():
+     parser = argparse.ArgumentParser(description='Train a segmentor')
+@@ -65,9 +67,20 @@ def parse_args():
+ 
+ 
+ def main():
++    print ("********** ", torch.__version__)
++    print(torch._C._cuda_getCompiledVersion(), 'cuda compiled version')
++    print(torch.version.cuda, 'cuda version')
++    print("****************************")
++
++
+     args = parse_args()
+ 
+     cfg = Config.fromfile(args.config)
++
++    ts = os.getenv("TRAIN_SPLIT")
++    if ts is not None and hasattr(cfg.data.train, "split"):
++        cfg.data.train.split = ts
++
+     if args.options is not None:
+         cfg.merge_from_dict(args.options)
+     # set cudnn_benchmark
+@@ -107,6 +120,8 @@ def main():
+     log_file = osp.join(cfg.work_dir, f'{timestamp}.log')
+     logger = get_root_logger(log_file=log_file, log_level=cfg.log_level)
+ 
++    logger.info(f'Slurm job id: {os.getenv("SLURM_JOB_ID")}')
++
+     # init the meta dict to record some important information such as
+     # environment info and seed, which will be logged
+     meta = dict()
+@@ -114,6 +129,7 @@ def main():
+     env_info_dict = collect_env()
+     env_info = '\n'.join([f'{k}: {v}' for k, v in env_info_dict.items()])
+     dash_line = '-' * 60 + '\n'
++
+     logger.info('Environment info:\n' + dash_line + env_info + '\n' +
+                 dash_line)
+     meta['env_info'] = env_info
+@@ -139,6 +155,7 @@ def main():
+     logger.info(model)
+ 
+     datasets = [build_dataset(cfg.data.train)]
++
+     if len(cfg.workflow) == 2:
+         val_dataset = copy.deepcopy(cfg.data.val)
+         val_dataset.pipeline = cfg.data.train.pipeline
+@@ -151,6 +168,7 @@ def main():
+             config=cfg.pretty_text,
+             CLASSES=datasets[0].CLASSES,
+             PALETTE=datasets[0].PALETTE)
++
+     # add an attribute for visualization convenience
+     model.CLASSES = datasets[0].CLASSES
+     train_segmentor(
