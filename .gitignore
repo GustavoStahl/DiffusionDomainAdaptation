@@ -1,6 +1,19 @@
 # dirs
 wandb/
 dcgm/
+.ipynb_checkpoints/
+__pycache__/
+samples/
+results/
+
+# experimental modules
+ControlNet/
+CREStereo/
+prompt-to-prompt/
+segment-anything/
+
+# scripts
+*.ipynb
 
 # images
 *.jpg
