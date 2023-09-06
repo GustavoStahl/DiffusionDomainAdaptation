@@ -1,0 +1,12 @@
+# dirs
+wandb/
+dcgm/
+
+# images
+*.jpg
+*.png
+*.jpeg
+
+# log files
+*.err
+*.out
