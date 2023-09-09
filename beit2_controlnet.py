@@ -70,7 +70,8 @@ def get_canny(image):
 def test(cnet_aug,
          eval_model,
          test_dataloader,
-         epoch):
+         epoch,
+         max_batches=None):
     
     prompt = Config.PROMPT
     cnet_normalize = Normalize(Config.CNET_MEAN, Config.CNET_STD)
@@ -91,7 +92,9 @@ def test(cnet_aug,
         base_mean_iou = np.zeros(len(class_names), dtype=np.float32)
         base_mean_acc = np.zeros(len(class_names), dtype=np.float32)
     
-    for bidx, data in enumerate(tqdm(test_dataloader, desc=f"eval epoch {epoch}")):
+    pbar = tqdm(total=max_batches)
+    pbar.set_description(f"eval epoch {epoch}")
+    for bidx, data in enumerate(test_dataloader):
         
         assert len(data) == 3
         
@@ -189,6 +192,12 @@ def test(cnet_aug,
             canny_color = canny_guide.detach().permute(0, 2, 3, 1).cpu().numpy()
             canny_color = (canny_color[...,0] * 255).astype("uint8")
             canny_list.extend([wandb.Image(canny) for canny in canny_guide])            
+            
+        pbar.update(1)
+        if bidx + 1 == max_batches:
+            break
+
+    pbar.close()
         
     mean_acc /= len(test_dataloader)
     mean_iou /= len(test_dataloader)
@@ -330,8 +339,6 @@ def train(cnet_aug,
         if bidx + 1 == max_batches:
             break
     pbar.close()
-
-    # lr_scheduler.step(total_loss)
         
 def loop(cnet_aug,
          eval_model, 
@@ -342,12 +349,13 @@ def loop(cnet_aug,
          epochs):
     
     best_score = 0.
+    max_batches = None
     for epoch in range(epochs):
-        train(cnet_aug, eval_model, train_dataloader, optimizer, lr_scheduler, epoch, max_batches=None)
+        train(cnet_aug, eval_model, train_dataloader, optimizer, lr_scheduler, epoch, max_batches=max_batches)
         if epoch % 5 != 0:
             continue
         cnet_aug.set_eval()
-        acc, iou = test(cnet_aug, eval_model, test_dataloader, epoch)
+        acc, iou = test(cnet_aug, eval_model, test_dataloader, epoch, max_batches=max_batches)
         eval_score = (acc + iou) / 2.
         lr_scheduler.step(eval_score)
         if eval_score > best_score:
@@ -368,24 +376,34 @@ def parse_args():
                         help="BEITv2 cpkt path.")  
     parser.add_argument("--cnet_ckpt", 
                         default="lllyasviel/control_v11p_sd15_canny", 
-                        help="ControlNet cpkt path.")      
+                        help="ControlNet cpkt path.")   
+    parser.add_argument("--scheduler", 
+                        default="DDIM",
+                        choices=["DDIM", "DDPM"], 
+                        help="Scheduler to be used.")
+    parser.add_argument("--eta", 
+                        default=0.0,
+                        type=float,
+                        help="ETA for DDIM.")
     return parser.parse_args()
 
 def main(args):
-    #TODO 4. LPIPS?
-    #TODO 5. update fewer parameters from controlnet
-    #TODO 6. add a regularizer, L1 or L2 loss between a locked controlnet and our treinable one
-    #TODO 7. change from DDPM to DDIM (test inversion)
-        #NOTE: DDPM adds a lot of stochasticity, hence the image generated should look more unfamiliar than
-        #      the original. Of course, we want change applied, but we don't want to deviate so much from 
-        #      the input. That said, using DDIM we can somewhat be faithful to the input while getting the 
-        #      randomicity/divergence from controlnet injections
-    #TODO 8. remove the variation of denoising steps, keep it fixed to a low number of timesteps (e.g. 100) (done)
-        #NOTE: we assume that SD has learned everything we want from the world, so no need to keep tuning
-        #      different denoising steps. Therefore, we can fix the timesteps.
-    #TODO 9. denoise using SD until halfway, then denoise using SD+CNET
-    #TODO 10. denoise step by step, rather than just prediction x0
+    #TODO  4. LPIPS?
+    #TODO  5. update fewer parameters from controlnet
+    #TODO  6. add a regularizer, L1 or L2 loss between a locked controlnet and our treinable one
+    #TODO  7. change from DDPM to DDIM (test inversion)
+    #NOTE: DDPM adds a lot of stochasticity, hence the image generated should look more unfamiliar than
+    #      the original. Of course, we want change the image, but we don't want to deviate so much from 
+    #      the input. That said, using DDIM we can somewhat be faithful to the input while getting the 
+    #      randomicity/divergence from controlnet injections
+    #TODO  8. remove the variation of denoising steps, keep it fixed to a low number of timesteps (e.g. 100) (done)
+    #NOTE: we assume that SD has learned everything we want from the world, so no need to keep tuning
+    #      different denoising steps. Therefore, we can fix the timesteps.
+    #TODO  9. denoise using SD until halfway, then denoise using SD+CNET
+    #TODO 10. denoise step by step, rather than in one pass
     #TODO 11. add LORA to ControlNet
+    #TODO 12. check synthetic data validation results for BEiTv2 trained also on synthetic 
+    #TODO 13. check for networks trained on GTA. Useful for having baselines.
        
     lr = 1e-5
     epochs = 100
@@ -400,7 +418,10 @@ def main(args):
     train_dataloader = ommutils.get_dataloader(cfg_path, split="train", batch_size=batch_size)
     test_dataloader = ommutils.get_dataloader(cfg_path, split="test", batch_size=batch_size)
     
-    controlnet_aug = ControlNetAugmentation(args.cnet_ckpt, num_inference_steps=num_inference_steps)
+    controlnet_aug = ControlNetAugmentation(args.cnet_ckpt, 
+                                            num_inference_steps=num_inference_steps,
+                                            scheduler_type=args.scheduler,
+                                            eta=args.eta)
     eval_model = ommutils.get_model(cfg_path, beit_ckpt_path, is_frozen=True)
     
     optimizer = AdamW(controlnet_aug.get_trainable_params(), lr=lr)

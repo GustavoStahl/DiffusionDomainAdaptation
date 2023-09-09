@@ -6,15 +6,20 @@ from diffusers import (
     ControlNetModel, 
     AutoencoderKL, 
     UNet2DConditionModel,
-    DDIMScheduler
+    DDIMScheduler,
+    DDPMScheduler
 )
 
 from diffusers.utils.import_utils import is_xformers_available
 
+from tqdm import tqdm
+
 class ControlNetAugmentation(nn.Module):
     def __init__(self, 
                  model_path, 
-                 num_inference_steps=None):
+                 num_inference_steps=50,
+                 scheduler_type="DDIM",
+                 eta=0.0):
         super().__init__()
         
         device = "cuda"
@@ -22,8 +27,12 @@ class ControlNetAugmentation(nn.Module):
         controlnet = ControlNetModel.from_pretrained(model_path)
         vae = AutoencoderKL.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="vae")
         unet = UNet2DConditionModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="unet")
-        scheduler = DDIMScheduler.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="scheduler")
         text_encoder = CLIPTextModel.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="text_encoder")
+        
+        if scheduler_type == "DDIM":
+            scheduler = DDIMScheduler.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="scheduler")
+        elif scheduler_type == "DDPM":
+            scheduler = DDPMScheduler.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="scheduler")
                       
         controlnet.train()    
         vae.requires_grad_(False)
@@ -42,6 +51,8 @@ class ControlNetAugmentation(nn.Module):
                 
         tokenizer = AutoTokenizer.from_pretrained("runwayml/stable-diffusion-v1-5", subfolder="tokenizer", use_fast=False)
         
+        self.is_eval = False
+        
         self.vae = vae
         self.unet = unet
         self.device = device
@@ -50,6 +61,9 @@ class ControlNetAugmentation(nn.Module):
         self.controlnet = controlnet
         self.text_encoder = text_encoder
         self.num_inference_steps = num_inference_steps
+        
+        self.eta = eta
+        self.scheduler_type = scheduler_type
         
     def forward(self, image, condition, prompt):
         #NOTE: image:     should be normalized between [-1., 1.]
@@ -73,39 +87,67 @@ class ControlNetAugmentation(nn.Module):
         
         # Sample a random timestep for each image
         batch_size = latents.shape[0]
-        if self.num_inference_steps is None:
-            timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,), device=latents.device)
+        if self.is_eval:
+            self.scheduler.set_timesteps(self.num_inference_steps, device=latents.device)
+            timesteps = self.scheduler.timesteps
+            noisy_latents = self.scheduler.add_noise(latents, noise, timesteps[0].repeat(batch_size))
         else:
-            timesteps = torch.tensor([self.num_inference_steps] * batch_size, device=latents.device)
+            #NOTE: Method 1
+            # timesteps = torch.tensor([self.num_inference_steps] * batch_size, device=latents.device)
+            
+            #NOTE: Method 2
+            #TODO investigate, should use num_inference_step or scheduler.config.num_train_timesteps
+            timesteps = torch.randint(0, self.scheduler.config.num_train_timesteps, (batch_size,), device=latents.device)
+            
+            #NOTE: Method 3
+            # self.scheduler.set_timesteps(self.num_inference_steps, device=latents.device)
+            # indices = torch.randint(len(self.scheduler.timesteps), (batch_size,))
+            # timesteps = self.scheduler.timesteps[indices]
+            
+            noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
+        
+        # hacky way of combining train with validation
+        if not self.is_eval:
+            timesteps = timesteps[None]
+            
+        timesteps = tqdm(timesteps, leave=None, desc="denoising step-by-step") if self.is_eval else timesteps
+        for t in timesteps:
+            #NOTE [DEBUG]: the result of this opperation occupies ~14Gb of VRAM 
+            down_block_res_samples, mid_block_res_sample = self.controlnet(
+                noisy_latents,
+                t,
+                encoder_hidden_states=embeddings,
+                controlnet_cond=condition,
+                return_dict=False,
+            )
 
-        noisy_latents = self.scheduler.add_noise(latents, noise, timesteps)
+            # Predict the noise residual
+            #NOTE [DEBUG]: the result of this opperation occupies ~53Gb of VRAM 
+            noise_pred = self.unet(
+                noisy_latents,
+                t,
+                encoder_hidden_states=embeddings,
+                down_block_additional_residuals=[
+                    sample.to(dtype=torch.float32) for sample in down_block_res_samples
+                ],
+                mid_block_additional_residual=mid_block_res_sample.to(dtype=torch.float32),
+            ).sample
+                    
+            # perfom 1 denoise step
+            if self.is_eval:
+                if self.scheduler_type == "DDIM":
+                    noisy_latents = self.scheduler.step(noise_pred, t, noisy_latents, eta=self.eta, return_dict=False)[0]
+                if self.scheduler_type == "DDPM":
+                    noisy_latents = self.scheduler.step(noise_pred, t, noisy_latents, return_dict=False)[0]
+            # perfom x0 prediction
+            else:
+                alpha_prod_t = self.scheduler.alphas_cumprod[t]
+                beta_prod_t = 1 - alpha_prod_t
+                alpha_prod_t = alpha_prod_t[:,None,None,None].to(latents.device)
+                beta_prod_t = beta_prod_t[:,None,None,None].to(latents.device)
+                noisy_latents = (noisy_latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
                 
-        #NOTE [DEBUG]: the result of this opperation occupies ~14Gb of VRAM 
-        down_block_res_samples, mid_block_res_sample = self.controlnet(
-            noisy_latents,
-            timesteps,
-            encoder_hidden_states=embeddings,
-            controlnet_cond=condition,
-            return_dict=False,
-        )
-
-        # Predict the noise residual
-        #NOTE [DEBUG]: the result of this opperation occupies ~53Gb of VRAM 
-        noise_pred = self.unet(
-            noisy_latents,
-            timesteps,
-            encoder_hidden_states=embeddings,
-            down_block_additional_residuals=[
-                sample.to(dtype=torch.float32) for sample in down_block_res_samples
-            ],
-            mid_block_additional_residual=mid_block_res_sample.to(dtype=torch.float32),
-        ).sample
-                
-        alpha_prod_t = self.scheduler.alphas_cumprod[timesteps]
-        beta_prod_t = 1 - alpha_prod_t
-        alpha_prod_t = alpha_prod_t[:,None,None,None].to(latents.device)
-        beta_prod_t = beta_prod_t[:,None,None,None].to(latents.device)
-        denoised_latents = (noisy_latents - beta_prod_t ** (0.5) * noise_pred) / alpha_prod_t ** (0.5)
+        denoised_latents = noisy_latents
         
         denoised_latents = denoised_latents.clamp(-1., 1.)
                         
@@ -123,7 +165,9 @@ class ControlNetAugmentation(nn.Module):
         self.controlnet.save_pretrained(path, safe_serialization=True)
            
     def set_train(self):
+        self.is_eval = False
         self.controlnet.train()
         
     def set_eval(self):
+        self.is_eval = True
         self.controlnet.eval()
