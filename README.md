@@ -12,3 +12,8 @@ ln -s $PWD/unilm/beit2/semantic_segmentation/ $PWD/beit2
 ```
 conda env create -f environment.yml
 ```
+
+### Install xformers
+```
+pip install -v -U git+https://github.com/facebookresearch/xformers.git@main#egg=xformers
+```
