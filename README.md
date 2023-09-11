@@ -10,6 +10,7 @@ ln -s $PWD/unilm/beit2/semantic_segmentation/ $PWD/beit2
 
 ### Creating environment
 ```
+module add cuda gcc # <-- if in SLURM
 conda env create -f environment.yml
 ```
 
