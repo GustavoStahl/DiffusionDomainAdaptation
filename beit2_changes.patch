@@ -13,7 +13,7 @@ index 925dc4b..ea53afc 100644
      """
 diff --git a/beit2/semantic_segmentation/configs/gustavo_controlnet.py b/beit2/semantic_segmentation/configs/gustavo_controlnet.py
 new file mode 100644
-index 0000000..291035d
+index 0000000..8f3005a
 --- /dev/null
 +++ b/beit2/semantic_segmentation/configs/gustavo_controlnet.py
 @@ -0,0 +1,156 @@
@@ -68,14 +68,14 @@ index 0000000..291035d
 +    workers_per_gpu=4,
 +    train=dict(
 +        type="WinLab",
-+        data_root='/ibex/user/stahlg/datasets/winlab_1',
++        data_root='/home/stahlg/winlab_1',
 +        split='1024.txt', # overwritten in train.py
 +        img_dir='rgb',
 +        ann_dir='labels',
 +        pipeline=train_pipeline),
 +    test=dict(
 +        type="WinLab",
-+        data_root='/ibex/user/stahlg/datasets/winlab_1',
++        data_root='/home/stahlg/winlab_1',
 +        split="val_200.txt", # overwritten in train.py
 +        img_dir='rgb',
 +        ann_dir='labels',
@@ -145,12 +145,12 @@ index 0000000..291035d
 +    auxiliary_head=dict(
 +        in_channels=768,
 +        num_classes=12
-+    ), 
++    ),
 +    test_cfg = dict(mode='slide', crop_size=crop_size, stride=(341, 341))
 +)
 +
 +optimizer = dict(type='AdamW', lr=5e-5, betas=(0.9, 0.999), weight_decay=0.05,
-+                 constructor='LayerDecayOptimizerConstructor', 
++                 constructor='LayerDecayOptimizerConstructor',
 +                 paramwise_cfg=dict(num_layers=12, layer_decay_rate=0.85))
 +
 +lr_config = dict(policy='poly',
@@ -175,7 +175,7 @@ index 0000000..291035d
 +)
 diff --git a/beit2/semantic_segmentation/configs/gustavo_sign.py b/beit2/semantic_segmentation/configs/gustavo_sign.py
 new file mode 100644
-index 0000000..cfdc814
+index 0000000..6c2a7a6
 --- /dev/null
 +++ b/beit2/semantic_segmentation/configs/gustavo_sign.py
 @@ -0,0 +1,176 @@
@@ -327,12 +327,12 @@ index 0000000..cfdc814
 +    auxiliary_head=dict(
 +        in_channels=768,
 +        num_classes=12
-+    ), 
++    ),
 +    test_cfg = dict(mode='slide', crop_size=crop_size, stride=(341, 341))
 +)
 +
 +optimizer = dict(type='AdamW', lr=5e-5, betas=(0.9, 0.999), weight_decay=0.05,
-+                 constructor='LayerDecayOptimizerConstructor', 
++                 constructor='LayerDecayOptimizerConstructor',
 +                 paramwise_cfg=dict(num_layers=12, layer_decay_rate=0.85))
 +
 +lr_config = dict(policy='poly',
@@ -375,7 +375,7 @@ index 0000000..f99b454
 \ No newline at end of file
 diff --git a/beit2/semantic_segmentation/datasets/win_template.py b/beit2/semantic_segmentation/datasets/win_template.py
 new file mode 100644
-index 0000000..8c70faa
+index 0000000..9ded3fa
 --- /dev/null
 +++ b/beit2/semantic_segmentation/datasets/win_template.py
 @@ -0,0 +1,165 @@
@@ -460,7 +460,7 @@ index 0000000..8c70faa
 +            metric,
 +            label_map=self.label_map,
 +            reduce_zero_label=self.reduce_zero_label)
-+        
++
 +        #! [begin] testing counting mislabels
 +        # mislabels_per_class = np.zeros((num_classes, num_classes), dtype=np.int)
 +
@@ -473,7 +473,7 @@ index 0000000..8c70faa
 +        #     # Count mislabels per class
 +        #     for i in range(num_classes):
 +        #         for j in range(num_classes):
-+        #             # if i == j: 
++        #             # if i == j:
 +        #             #     continue
 +        #             # gt_mask_equals_class = (gt_mask_flat == j)
 +        #             # gt_mask_equals_class_sum = np.sum(gt_mask_equals_class)
@@ -481,9 +481,9 @@ index 0000000..8c70faa
 +        #             mislabels_per_class[i, j] += np.sum((pred_mask_flat == i) & (gt_mask_flat == j))
 +        # for i in range(num_classes):
 +        #     for j in range(num_classes):
-+        #         print(f"Class {i} labeled as class {j}: {mislabels_per_class[i, j]}")                    
-+        #! [end] testing counting mislabels                    
-+        
++        #         print(f"Class {i} labeled as class {j}: {mislabels_per_class[i, j]}")
++        #! [end] testing counting mislabels
++
 +        #! hardcoded. Removing 0.0 score for the classe "none"
 +        ret_metrics[-1][0] = np.nan
 +
@@ -517,7 +517,7 @@ index 0000000..8c70faa
 +        summary_table_data = [['Scope'] +
 +                              ['m' + head
 +                               for head in class_table_data[0][1:]] + ['aAcc']]
-+        
++
 +        ret_metrics_mean = [
 +            np.round(np.nanmean(ret_metric) * 100, 2)
 +            for ret_metric in ret_metrics
@@ -740,10 +740,10 @@ index 1b67423..887ecdc 100644
 +    print ("********************** six")
 diff --git a/beit2/semantic_segmentation/tools/mask_distribution.py b/beit2/semantic_segmentation/tools/mask_distribution.py
 new file mode 100644
-index 0000000..4a893a8
+index 0000000..b8ce5fa
 --- /dev/null
 +++ b/beit2/semantic_segmentation/tools/mask_distribution.py
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,55 @@
 +from glob import glob
 +import os
 +import sys
@@ -752,38 +752,38 @@ index 0000000..4a893a8
 +from tqdm import tqdm
 +import matplotlib.pyplot as plt
 +
-+from datasets.win_template import WinTemplate 
++from datasets.win_template import WinTemplate
 +
 +if __name__ == "__main__":
-+    
++
 +    dataset_path = sys.argv[1]
-+    
++
 +    filenames = None
 +    if os.path.isfile(dataset_path):
 +        basedir = os.path.dirname(dataset_path)
 +        with open(dataset_path, 'r') as f:
 +            filenames = [os.path.join(basedir, "labels", f"{line.rstrip()}.png") for line in f.readlines()]
-+            
++
 +    elif os.path.isdir(dataset_path):
 +        filenames = sorted(glob(os.path.join(dataset_path, "labels", "*.png")))
-+        
++
 +    else:
 +        sys.exit("Invalid param")
-+            
++
 +    masks_accum_dict = {class_name : np.zeros((512,512), dtype=int) for class_name in WinTemplate.CLASSES}
 +    for filename in tqdm(filenames):
 +        image = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
 +        unique_indexes = np.unique(image)
-+        
++
 +        for index in unique_indexes:
 +            class_name = WinTemplate.CLASSES[index]
 +            masks_accum_dict[class_name] += (image == index).astype(int)
-+            
++
 +    fig, axs = plt.subplots(3, 4, figsize=(12, 8))
 +    for i, (class_name, mask_accum) in enumerate(masks_accum_dict.items()):
 +        row = i // 4  # Determine the row index
 +        col = i % 4   # Determine the column index
-+        
++
 +        min_val, max_val, *_ = cv2.minMaxLoc(mask_accum)
 +        mask_accum_norm = (mask_accum - min_val)/(max_val - min_val + 1e-6)
 +
@@ -798,12 +798,10 @@ index 0000000..4a893a8
 +    fig.tight_layout()
 +
 +    # Show the plot
-+    plt.show()        
-+        
-\ No newline at end of file
++    plt.show()
 diff --git a/beit2/semantic_segmentation/tools/mean_and_std.py b/beit2/semantic_segmentation/tools/mean_and_std.py
 new file mode 100644
-index 0000000..04c99d1
+index 0000000..3b9c50e
 --- /dev/null
 +++ b/beit2/semantic_segmentation/tools/mean_and_std.py
 @@ -0,0 +1,49 @@
@@ -817,13 +815,13 @@ index 0000000..04c99d1
 +    parser.add_argument("-d", "--dataset", required=True, type=str,
 +                        help="Path to the dataset image folder.")
 +    parser.add_argument("-s", "--split", required=False, type=str,
-+                        help="Path to split file.")    
++                        help="Path to split file.")
 +    return parser.parse_args()
 +
 +def main():
 +    """ Compute mean and std using the Sum of Squares Formula Shortcut """
 +    args = get_args()
-+    
++
 +    exts = ["png", "jpg", "jpeg", "tif"]
 +    image_paths = []
 +    if args.split:
@@ -836,7 +834,7 @@ index 0000000..04c99d1
 +                        image_paths.append(filepath)
 +    else:
 +        image_paths = [path for ext in exts for path in glob(os.path.join(args.dataset, f"*.{ext}"))]
-+        
++
 +    image = None
 +    psum = np.zeros(3, dtype=int)
 +    psum_sq = np.zeros(3, dtype=int)
@@ -844,25 +842,25 @@ index 0000000..04c99d1
 +        image = cv2.imread(image_path, cv2.IMREAD_COLOR).astype(int)
 +        psum += image.sum(axis=(0,1))
 +        psum_sq += np.power(image, 2).sum(axis=(0,1))
-+        
++
 +    pixel_count = len(image_paths) * image.shape[0] * image.shape[1]
-+    
++
 +    total_mean = psum / pixel_count
 +    total_var  = (psum_sq / pixel_count) - np.power(total_mean, 2)
 +    total_std  = np.sqrt(total_var)
-+        
++
 +    print(f"[RGB] Mean: {repr(total_mean[::-1])}", f"Std: {repr(total_std[::-1])}")
-+        
++
 +
 +if __name__ == "__main__":
 +    main()
 \ No newline at end of file
 diff --git a/beit2/semantic_segmentation/tools/openmm_utils.py b/beit2/semantic_segmentation/tools/openmm_utils.py
 new file mode 100644
-index 0000000..70be0e6
+index 0000000..bc6b597
 --- /dev/null
 +++ b/beit2/semantic_segmentation/tools/openmm_utils.py
-@@ -0,0 +1,56 @@
+@@ -0,0 +1,57 @@
 +import torch
 +
 +from mmcv import Config
@@ -880,44 +878,45 @@ index 0000000..70be0e6
 +#NOTE: add force=True to @BACKBONES.register_module in BEiT's class
 +#NOTE: OpenMM libraries: mim install mmcv-full==1.6.0 mmsegmentation==0.27, verify torch dependencies
 +
-+def get_model(cfg_path, ckpt_path, is_frozen=True):
++def get_model(cfg_path, ckpt_path, device="cuda", is_frozen=True):
 +    cfg = Config.fromfile(cfg_path)
-+    
++
 +    # set cudnn_benchmark, useful when image size doesn't vary
 +    if cfg.get('cudnn_benchmark', False):
 +        torch.backends.cudnn.benchmark = True
-+        
++
 +    cfg.model.pretrained = None
-+    
++
 +    # build the model and load checkpoint
 +    cfg.model.train_cfg = None
 +    model = build_segmentor(cfg.model, test_cfg=cfg.get('test_cfg'))
-+    checkpoint = load_checkpoint(model, ckpt_path) #, map_location='cpu')
++    checkpoint = load_checkpoint(model, ckpt_path, map_location=device)
 +    model.CLASSES = WinLab.CLASSES
 +    model.PALETTE = WinLab.PALETTE
 +    model.cfg = cfg
 +
-+    model = MMDataParallel(model, device_ids=[0])
++    device_id = None if device == "cpu" else int(device.split(':')[-1]) if ':' in device else 0
++    model = MMDataParallel(model, device_ids=[device_id])
 +    model.eval()
 +
 +    return model
 +
 +def get_dataloader(cfg_path, split="train", batch_size=None):
 +    cfg = Config.fromfile(cfg_path)
-+    
++
 +    if batch_size is not None:
 +        cfg.data.samples_per_gpu = batch_size
-+    
++
 +    # cfg.data.test.test_mode = True
-+    
++
 +    # build the dataloader
 +    dataset = build_dataset(cfg.data[split])
 +    data_loader = build_dataloader(
 +        dataset,
 +        samples_per_gpu=cfg.data.samples_per_gpu,
 +        workers_per_gpu=cfg.data.workers_per_gpu,
-+        shuffle=False)
-+    
++        shuffle=True if split == "train" else False)
++
 +    return data_loader
 diff --git a/beit2/semantic_segmentation/tools/test.py b/beit2/semantic_segmentation/tools/test.py
 index b239e9d..dbaa259 100644
