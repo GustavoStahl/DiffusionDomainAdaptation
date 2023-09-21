@@ -18,6 +18,8 @@ from pytorch_msssim import MS_SSIM
 
 # custom scripts
 from controlnet_augmentation import ControlNetAugmentation
+from t2i_augmentation import T2IAdapterAugmentation
+from base_augmentation import SchedulerType, DenoiseType
 #NOTE: for this import to work you should add BEIT's directory path to 
 #      the envionment variable PYTHONPATH, doing with sys.path doesn't work
 #      e.g., PYTHONPATH=$PYTHONPATH:$PWD/beit2 python file.py
@@ -33,13 +35,14 @@ import torchshow as ts
 # necessary for torchshow
 import matplotlib; matplotlib.use("Agg")
 
-import matplotlib.pyplot as plt
+from dataclasses import dataclass
 
-device = "cuda"
+device = None
 
+@dataclass
 class Config(object):
     #NOTE hardcoded prompt
-    PROMPT = "An image of a window."
+    PROMPT = ""
     # input shape
     CNET_INSHAPE = (512,512)
     BEIT_INSHAPE = (224,224)
@@ -55,6 +58,10 @@ def set_determinism():
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    
+def clear_cache():
+    gc.collect()
+    torch.cuda.empty_cache()  
     
 def get_canny(image):
     # Get canny edges from input image
@@ -92,11 +99,16 @@ def test(cnet_aug,
         base_mean_iou = np.zeros(len(class_names), dtype=np.float32)
         base_mean_acc = np.zeros(len(class_names), dtype=np.float32)
     
+    max_batches = len(test_dataloader) if max_batches is None else max_batches
+    
     pbar = tqdm(total=max_batches)
     pbar.set_description(f"eval epoch {epoch}")
     for bidx, data in enumerate(test_dataloader):
         
         assert len(data) == 3
+        
+        # garbage collector
+        clear_cache()       
         
         image = data["img"].data[0] # RGB, float32, (512, 512), norm [0,1]
         metas = data["img_metas"].data[0]
@@ -116,7 +128,7 @@ def test(cnet_aug,
                                             
         #NOTE: this expects RGB
         with torch.no_grad():
-            diffusion_pred = cnet_aug(image_norm, canny_guide, prompt)
+            diffusion_pred, *_ = cnet_aug(image_norm, canny_guide, prompt)
                                 
         diffusion_pred_rsz = beit_bilinear_resize(diffusion_pred)
         diffusion_pred_norm = beit_normalize(diffusion_pred_rsz)  
@@ -145,22 +157,7 @@ def test(cnet_aug,
         
         mean_acc += np.nan_to_num(ret_metrics["Acc"])
         mean_iou += np.nan_to_num(ret_metrics["IoU"])
-                                           
-        # save results every N batches
-        if bidx % (len(test_dataloader) // 4) != 0: 
-            continue
-                                       
-        for im_color, pred_mask, true_mask in zip(diffusion_color, eval_model_pred, gt_numpy):
-            class_labels = {i:c for (i,c) in enumerate(class_names)}
-            
-            true_mask = cv2.resize(true_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
-            pred_mask = cv2.resize(pred_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
-            
-            masks = {"prediction": {"mask_data": pred_mask, "class_labels": class_labels}, 
-                     "ground_truth": {"mask_data": true_mask, "class_labels": class_labels}}
-            
-            cnet_list.append(wandb.Image(im_color, masks=masks))
-            
+        
         # compute baselines
         if first_epoch:
             with torch.no_grad():
@@ -176,8 +173,28 @@ def test(cnet_aug,
                                         label_map=None,
                                         reduce_zero_label=False)
             base_mean_acc += np.nan_to_num(base_metrics["Acc"])
-            base_mean_iou += np.nan_to_num(base_metrics["IoU"])          
-                               
+            base_mean_iou += np.nan_to_num(base_metrics["IoU"]) 
+                                                   
+        # save results every N batches
+        if bidx % (max(max_batches // 4, 1)) != 0: 
+            clear_cache()
+            pbar.update(1)
+            if bidx + 1 == max_batches:
+                break
+            continue
+                                       
+        for im_color, pred_mask, true_mask in zip(diffusion_color, eval_model_pred, gt_numpy):
+            class_labels = {i:c for (i,c) in enumerate(class_names)}
+            
+            true_mask = cv2.resize(true_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
+            pred_mask = cv2.resize(pred_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
+            
+            masks = {"prediction": {"mask_data": pred_mask, "class_labels": class_labels}, 
+                     "ground_truth": {"mask_data": true_mask, "class_labels": class_labels}}
+            
+            cnet_list.append(wandb.Image(im_color, masks=masks))
+            
+        if first_epoch:
             for im_color, pred_mask, true_mask in zip(image_color, eval_model_pred, gt_numpy):
                 class_labels = {i:c for (i,c) in enumerate(class_names)}
                 
@@ -192,15 +209,16 @@ def test(cnet_aug,
             canny_color = canny_guide.detach().permute(0, 2, 3, 1).cpu().numpy()
             canny_color = (canny_color[...,0] * 255).astype("uint8")
             canny_list.extend([wandb.Image(canny) for canny in canny_guide])            
-            
+
+        clear_cache()
         pbar.update(1)
         if bidx + 1 == max_batches:
             break
-
+            
     pbar.close()
         
-    mean_acc /= len(test_dataloader)
-    mean_iou /= len(test_dataloader)
+    mean_acc /= max_batches
+    mean_iou /= max_batches
     for class_name, acc, iou in zip(class_names, mean_acc, mean_iou):
         wandb.log({f"eval/metrics/acc/{class_name}": acc}, step=epoch)                
         wandb.log({f"eval/metrics/iou/{class_name}": iou}, step=epoch)
@@ -223,8 +241,8 @@ def test(cnet_aug,
         wandb.log({"eval/images/canny": canny_list}, step=epoch)            
         wandb.log({"baseline/images/raw": rgb_list}, step=epoch)
         
-        base_mean_acc /= len(test_dataloader)
-        base_mean_iou /= len(test_dataloader)
+        base_mean_acc /= max_batches
+        base_mean_iou /= max_batches
         for metric_name, metric_values in zip(["Acc", "IoU"], [base_mean_acc, base_mean_iou]):
             # Create a wandb.Table with columns for class names and metric values
             table_data = list(zip(class_names, metric_values))
@@ -243,8 +261,8 @@ def train(cnet_aug,
           eval_model, 
           train_dataloader, 
           optimizer,
-          lr_scheduler,
           epoch,
+          diffusion_loss_alpha,
           max_batches=None):
                                 
     prompt = Config.PROMPT
@@ -261,7 +279,14 @@ def train(cnet_aug,
         ms_ssim = MS_SSIM(win_size=win_size, data_range=1., size_average=True, channel=3) 
         # 0. maximum similarity, 1. no similarity
         similarity_loss_func = lambda x, y: 1.0 - ms_ssim(x,y) 
-        
+                
+    metrics_tracker = {}
+    def accum_metric(tracker, key, val):
+        if key not in tracker:
+            metrics_tracker[key] = val
+        else:
+            metrics_tracker[key] += val        
+    
     max_batches = len(train_dataloader) if max_batches is None else max_batches
     
     pbar = tqdm(total=max_batches)
@@ -269,6 +294,9 @@ def train(cnet_aug,
     for bidx, data in enumerate(train_dataloader):
         
         assert len(data) == 3
+
+        # garbage collector
+        clear_cache()      
         
         image = data["img"].data[0] # RGB, float32, (512, 512), norm [0,1]
         metas = data["img_metas"].data[0]
@@ -288,7 +316,7 @@ def train(cnet_aug,
         image_norm = cnet_normalize(image)
                                             
         #NOTE: this expects RGB
-        diffusion_pred = cnet_aug(image_norm, canny_guide, prompt)
+        diffusion_pred, denoise_loss, backward_helper = cnet_aug(image_norm, canny_guide, prompt)
         # ts.save(diffusion_pred, f"results/{cnet_aug.scheduler.__class__.__name__}_{cnet_aug.num_inference_steps}.png")
         # import sys; sys.exit("Finishing...")
                                 
@@ -310,34 +338,45 @@ def train(cnet_aug,
         beit_losses = {k:v for (k,v) in beit_logs.items() if "loss" in k}
         
         for name, metric in beit_acc.items():
-            wandb.log({f"train/metrics/{name}" : metric.item()}, step=epoch)
-
+            accum_metric(metrics_tracker, f"metrics/{name}", metric.item())
+            
         for name, loss in beit_losses.items():
-            wandb.log({f"train/losses/{name}" : loss.item()}, step=epoch)
-        
+            accum_metric(metrics_tracker, f"losses/{name}", loss.item())
+                        
         total_loss = sum(beit_losses.values())
-        
+                
         if use_ssim:
             similarity_loss = similarity_loss_func(diffusion_pred, image)
-            wandb.log({"train/losses/similarity_loss" : similarity_loss.item()}, step=epoch)
+            accum_metric(metrics_tracker, "losses/similarity_loss", similarity_loss.item())
             total_loss += similarity_loss
-            
-        wandb.log({"train/losses/total_loss" : total_loss.item()}, step=epoch)
-                        
-        #TODO add lr scheduler???
+                                                
         optimizer.zero_grad(set_to_none=True)
-        total_loss.backward()
+        total_loss.backward(retain_graph=False) # free the vae and the segmenter
+        
+        if diffusion_loss_alpha > 0.0:
+            accum_metric(metrics_tracker, f"losses/denoise_loss", denoise_loss.item())
+            accum_metric(metrics_tracker, "losses/total_loss", total_loss.item() + denoise_loss.item())
+            (diffusion_loss_alpha * denoise_loss).backward(retain_graph=True)
+        else:
+            accum_metric(metrics_tracker, "losses/total_loss", total_loss.item())
+        
+        if all(list(map(lambda x: x is not None, backward_helper.aslist()))):
+            x0, xt_prev, noise, timestep_xt_prev = backward_helper.aslist()
+            # xt_prev.backward(gradient=cnet_aug.add_noise(x0.grad, noise, timestep_xt_prev))
+            xt_prev.backward(gradient=x0.grad)
         optimizer.step()
         
+        clear_cache()       
         pbar.update(1)
-        
-        #TODO del variables???
-        gc.collect()
-        torch.cuda.empty_cache()
         
         # process first N batches
         if bidx + 1 == max_batches:
             break
+
+    for key, val in metrics_tracker.items():
+        val_mean = val / max_batches
+        wandb.log({f"train/{key}" : val_mean }, step=epoch)
+        
     pbar.close()
         
 def loop(cnet_aug,
@@ -346,13 +385,16 @@ def loop(cnet_aug,
          test_dataloader, 
          optimizer,
          lr_scheduler,
-         epochs):
+         epochs,
+         diffusion_loss_alpha,
+         max_batches=None,
+         no_eval=False):
     
     best_score = 0.
-    max_batches = None
     for epoch in range(epochs):
-        train(cnet_aug, eval_model, train_dataloader, optimizer, lr_scheduler, epoch, max_batches=max_batches)
-        if epoch % 5 != 0:
+        cnet_aug.set_train()
+        train(cnet_aug, eval_model, train_dataloader, optimizer, epoch, diffusion_loss_alpha, max_batches=max_batches)
+        if epoch % 10 != 0 or no_eval:
             continue
         cnet_aug.set_eval()
         acc, iou = test(cnet_aug, eval_model, test_dataloader, epoch, max_batches=max_batches)
@@ -361,7 +403,6 @@ def loop(cnet_aug,
         if eval_score > best_score:
             print("[INFO] Better weights found! Saving them...")
             cnet_aug.save_weights(os.path.join(wandb.run.dir, "weights"))
-        cnet_aug.set_train()
             
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -374,17 +415,59 @@ def parse_args():
     parser.add_argument("--beit_ckpt", 
                         required=True, 
                         help="BEITv2 cpkt path.")  
+    parser.add_argument("--lr", 
+                        default=1e-4,
+                        type=float,
+                        help="Training learning rate.")    
+    parser.add_argument("--epochs", 
+                        type=int,
+                        default=100, 
+                        help="Training epochs.")   
+    parser.add_argument("--batch_size", 
+                        type=int,
+                        default=8, 
+                        help="Number of samples in batch.")
+    parser.add_argument("--max_batches", 
+                        type=int,
+                        default=None, 
+                        help="Number of samples in batch.")                      
     parser.add_argument("--cnet_ckpt", 
                         default="lllyasviel/control_v11p_sd15_canny", 
                         help="ControlNet cpkt path.")   
+    parser.add_argument("--max_timesteps", 
+                        type=int,
+                        default=1000, 
+                        help="Max number of timesteps in diffusion.")   
+    parser.add_argument("--num_timesteps", 
+                        type=int,
+                        default=20, 
+                        help="How many timesteps to use, "
+                             "timesteps = max_timesteps / num_timesteps.")   
+    parser.add_argument("--no_eval", 
+                        action="store_true",
+                        help="Don't perform validation steps")
     parser.add_argument("--scheduler", 
-                        default="DDIM",
-                        choices=["DDIM", "DDPM"], 
+                        type=str,
+                        default=SchedulerType.DDIM.name,
+                        choices=SchedulerType.options(), 
                         help="Scheduler to be used.")
     parser.add_argument("--eta", 
                         default=0.0,
                         type=float,
                         help="ETA for DDIM.")
+    parser.add_argument("--denoise", 
+                        type=str,
+                        default=DenoiseType.PARTIAL_DENOISE_T_FIXED.name,
+                        choices=DenoiseType.options(), 
+                        help="Type of denoise to be used.")  
+    parser.add_argument("--diffusion_loss_alpha", 
+                        type=float,
+                        default=0.0,
+                        help="Weight factor for the diffusion loss.")        
+    parser.add_argument("--device", 
+                        type=str,
+                        default="cuda:0", 
+                        help="Which device to use for the training.")       
     return parser.parse_args()
 
 def main(args):
@@ -404,42 +487,56 @@ def main(args):
     #TODO 11. add LORA to ControlNet
     #TODO 12. check synthetic data validation results for BEiTv2 trained also on synthetic 
     #TODO 13. check for networks trained on GTA. Useful for having baselines.
-       
-    lr = 1e-5
-    epochs = 100
-    batch_size = 8
-    num_inference_steps = 50
+           
+    global device
+    device = args.device
     cfg_path = args.config
-    beit_ckpt_path = args.beit_ckpt
     
     # avoid randomicity
     set_determinism()
     
-    train_dataloader = ommutils.get_dataloader(cfg_path, split="train", batch_size=batch_size)
-    test_dataloader = ommutils.get_dataloader(cfg_path, split="test", batch_size=batch_size)
+    train_dataloader = ommutils.get_dataloader(cfg_path, split="train", batch_size=args.batch_size)
+    test_dataloader = ommutils.get_dataloader(cfg_path, split="test", batch_size=args.batch_size)
     
-    controlnet_aug = ControlNetAugmentation(args.cnet_ckpt, 
-                                            num_inference_steps=num_inference_steps,
-                                            scheduler_type=args.scheduler,
-                                            eta=args.eta)
-    eval_model = ommutils.get_model(cfg_path, beit_ckpt_path, is_frozen=True)
+    scheduler_type = SchedulerType[args.scheduler]
+    denoise_type = DenoiseType[args.denoise]
+        
+    augmentation_model = ControlNetAugmentation(args.cnet_ckpt, 
+                                                scheduler_type=scheduler_type,
+                                                eta=args.eta,
+                                                max_timesteps=args.max_timesteps,
+                                                num_timesteps=args.num_timesteps,
+                                                denoise_type=denoise_type,
+                                                device=device)
+    # augmentation_model = T2IAdapterAugmentation(args.cnet_ckpt, 
+    #                                             scheduler_type=scheduler_type,
+    #                                             eta=args.eta,
+    #                                             max_timesteps=args.max_timesteps,
+    #                                             num_timesteps=args.num_timesteps,
+    #                                             device=device)
+        
+    eval_model = ommutils.get_model(cfg_path, args.beit_ckpt, device=device)
     
-    optimizer = AdamW(controlnet_aug.get_trainable_params(), lr=lr)
+    optimizer = AdamW(augmentation_model.get_trainable_params(), lr=args.lr)
     lr_scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.5, verbose=True) # new_lr = lr * factor
         
     # Enable TF32 for faster training on Ampere GPUs
     torch.backends.cuda.matmul.allow_tf32 = True
     
     wandb.init(project="BEITandCNet",
-               name=args.exp)    
+               name=args.exp)   
+    wandb.run.log_code(".")
     
-    loop(controlnet_aug,
+    loop(augmentation_model,
          eval_model, 
          train_dataloader, 
          test_dataloader,
          optimizer,
          lr_scheduler,
-         epochs)
+         args.epochs,
+         args.diffusion_loss_alpha,
+         args.max_batches,
+         args.no_eval)
     
 if __name__ == "__main__":
     args = parse_args()
