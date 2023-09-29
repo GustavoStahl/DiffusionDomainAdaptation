@@ -2,6 +2,7 @@
 wandb/
 dcgm/
 .ipynb_checkpoints/
+.vscode/
 __pycache__/
 samples/
 results/
