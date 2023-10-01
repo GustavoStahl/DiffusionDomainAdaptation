@@ -74,7 +74,6 @@ def test(model:nn.Module,
     
     visual_pred_list = []
     for bidx, data in enumerate(test_dataloader):
-        clear_cache()
         
         image, gt = data
         
@@ -98,7 +97,6 @@ def test(model:nn.Module,
             
         # save results every N batches
         if bidx % (max(max_batches // 4, 1)) != 0: 
-            clear_cache()
             pbar.update(1)
             if bidx + 1 == max_batches:
                 break
@@ -116,7 +114,6 @@ def test(model:nn.Module,
             
             visual_pred_list.append(wandb.Image(im_color, masks=masks))    
             
-        clear_cache()
         pbar.update(1)
         if bidx + 1 == max_batches:
             break   
@@ -149,18 +146,11 @@ def train(model:nn.Module,
           epoch:int,
           max_batches:int=None):
         
-    class_names = train_dataloader.dataset.CLASSES
-    
-    mean_iou = np.zeros(len(class_names), dtype=np.float32)
-    mean_acc = np.zeros(len(class_names), dtype=np.float32)
-    
     max_batches = len(train_dataloader) if max_batches is None else max_batches
     pbar = tqdm(total=max_batches)
     pbar.set_description(f"train epoch {epoch}")
     
     for bidx, data in enumerate(train_dataloader):
-        clear_cache()
-        
         image, gt = data
         
         gt = gt.squeeze().to(device)
@@ -170,46 +160,16 @@ def train(model:nn.Module,
                                
         loss = F.cross_entropy(pred, gt.long())
         wandb.log({"train/loss/cross_entropy": loss.item()}, step=epoch)
-        
-        pred_classes = pred.detach().argmax(1).cpu().numpy()
-        ret_metrics = eval_metrics(pred_classes,
-                                   gt.cpu().numpy(),
-                                   len(class_names),
-                                   ignore_index=len(class_names)-1,
-                                   metrics=["mIoU"],
-                                   label_map=None)    
-        
-        mean_acc += np.nan_to_num(ret_metrics["Acc"])
-        mean_iou += np.nan_to_num(ret_metrics["IoU"])
-        
+               
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
         
-        clear_cache()
         pbar.update(1)
         
         # process first N batches
         if bidx + 1 == max_batches:
-            break   
-        
-    mean_acc /= max_batches
-    mean_iou /= max_batches
-    for class_name, acc, iou in zip(class_names, mean_acc, mean_iou):
-        wandb.log({f"train/metrics/acc/{class_name}": acc}, step=epoch)                
-        wandb.log({f"train/metrics/iou/{class_name}": iou}, step=epoch)
-        
-    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_acc, mean_iou]):
-        # Create a wandb.Table with columns for class names and metric values
-        table_data = list(zip(class_names, metric_values))
-        table = wandb.Table(data=table_data, columns=["class", metric_name])
-
-        # Create a bar graph using wandb.plot.bar
-        plot = wandb.plot.bar(table, label="class", value=metric_name, title=f'Per Class {metric_name}')
-
-        # Log the table and plot with a specific topic name
-        topic_name = f"train/metrics/{metric_name.lower()}"
-        wandb.log({f"{topic_name}_plot": plot}, step=epoch)               
+            break              
         
 def loop(model:nn.Module,
          train_dataloader:Iterable, 
@@ -234,6 +194,7 @@ def loop(model:nn.Module,
             save_dir = os.path.join(wandb.run.dir, "weights")
             os.makedirs(save_dir, exist_ok=True)
             torch.save(model, os.path.join(save_dir, "best.pth"))
+        clear_cache()
 
 def main(args):
     
