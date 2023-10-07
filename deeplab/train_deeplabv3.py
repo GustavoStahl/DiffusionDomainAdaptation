@@ -6,15 +6,13 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 from torchvision.models import ResNet101_Weights
 from torchvision.models.segmentation import deeplabv3_resnet101
 
-from gta_dataset import get_dataloader
-
 # Typing
 from torch.optim import Optimizer
 from torch import nn
 from collections.abc import Iterable
 from torch.optim.lr_scheduler import _LRScheduler
 
-from mmseg.core import eval_metrics
+from mmseg.core.evaluation.metrics import total_intersect_and_union, total_area_to_metrics
 
 import wandb
 import os
@@ -26,12 +24,9 @@ import argparse
 from tqdm import tqdm
 
 import numpy as np
+import cv2
 
-# torchshow for debugging
-from torchshow.visualization import auto_unnormalize_image
-# necessary for torchshow
-import matplotlib; matplotlib.use("Agg")
-
+from enum import Enum, auto
 
 device = None
 
@@ -48,11 +43,12 @@ def clear_cache():
     
 def tensor2image(_tensor):
     tensor = _tensor.detach()
+    b, c = tensor.size()[:2]
     
-    tensor_min = tensor.min(1, keepdim=True)[0]
-    tensor_max = tensor.max(1, keepdim=True)[0]
+    tensor_min = torch.min(tensor.view(b,c,-1), dim=2)[0].view(b,c,1,1)
+    tensor_max = torch.max(tensor.view(b,c,-1), dim=2)[0].view(b,c,1,1)
     
-    tensor_0_1 = (tensor - tensor_min / (tensor_max - tensor_min))
+    tensor_0_1 = (tensor - tensor_min) / (tensor_max - tensor_min)
     
     array_0_1 = tensor_0_1.permute(0,2,3,1).cpu().numpy()
     
@@ -64,14 +60,18 @@ def test(model:nn.Module,
          max_batches:int=None):
     
     class_names = test_dataloader.dataset.CLASSES
-    
-    mean_iou = np.zeros(len(class_names), dtype=np.float32)
-    mean_acc = np.zeros(len(class_names), dtype=np.float32)
+    void_idx = test_dataloader.dataset.VOID_IDX
     
     max_batches = len(test_dataloader) if max_batches is None else max_batches
     pbar = tqdm(total=max_batches)
     pbar.set_description(f"test epoch {epoch}")
     
+    num_classes = len(class_names)
+    total_area_intersect = torch.zeros((num_classes, ), dtype=torch.float64)
+    total_area_union = torch.zeros((num_classes, ), dtype=torch.float64)
+    total_area_pred_label = torch.zeros((num_classes, ), dtype=torch.float64)
+    total_area_label = torch.zeros((num_classes, ), dtype=torch.float64)  
+
     visual_pred_list = []
     for bidx, data in enumerate(test_dataloader):
         
@@ -85,15 +85,17 @@ def test(model:nn.Module,
         pred_classes = pred.argmax(1).cpu().numpy()
         gt = gt.squeeze().numpy()
         
-        ret_metrics = eval_metrics(pred_classes,
-                                   gt,
-                                   len(class_names),
-                                   ignore_index=len(class_names)-1,
-                                   metrics=["mIoU"],
-                                   label_map=None)    
-        
-        mean_acc += np.nan_to_num(ret_metrics["Acc"])
-        mean_iou += np.nan_to_num(ret_metrics["IoU"])        
+        area_intersect, area_union, \
+        area_pred_label, area_label = total_intersect_and_union(pred_classes, 
+                                                                gt, 
+                                                                num_classes, 
+                                                                void_idx, 
+                                                                label_map=None,
+                                                                reduce_zero_label=False)
+        total_area_intersect += area_intersect
+        total_area_union += area_union
+        total_area_pred_label += area_pred_label
+        total_area_label += area_label  
             
         # save results every N batches
         if bidx % (max(max_batches // 4, 1)) != 0: 
@@ -108,6 +110,12 @@ def test(model:nn.Module,
             
             pred_mask = pred_mask.astype("uint8")
             true_mask = true_mask.astype("uint8")
+            
+            h, w = im_color.shape[:2]
+            scale_target = 384 / w
+            im_color = cv2.resize(im_color, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_LINEAR)
+            pred_mask = cv2.resize(pred_mask, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_NEAREST)
+            true_mask = cv2.resize(true_mask, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_NEAREST)
 
             masks = {"prediction": {"mask_data": pred_mask, "class_labels": class_labels}, 
                      "ground_truth": {"mask_data": true_mask, "class_labels": class_labels}}
@@ -116,17 +124,31 @@ def test(model:nn.Module,
             
         pbar.update(1)
         if bidx + 1 == max_batches:
-            break   
+            break 
         
-    mean_acc /= max_batches
-    mean_iou /= max_batches
-    for class_name, acc, iou in zip(class_names, mean_acc, mean_iou):
+    ret_metrics = total_area_to_metrics(total_area_intersect, 
+                                        total_area_union,
+                                        total_area_pred_label,
+                                        total_area_label, 
+                                        metrics=["mIoU"], 
+                                        nan_to_num=0,
+                                        beta=1)       
+           
+    mean_acc = ret_metrics["Acc"]
+    mean_iou = ret_metrics["IoU"]          
+        
+    # Remove the void class from the metrics
+    mean_acc_no_void = np.delete(mean_acc, void_idx)
+    mean_iou_no_void = np.delete(mean_iou, void_idx)
+    class_names_no_void = list(np.delete(np.array(class_names, dtype=object), void_idx))
+        
+    for class_name, acc, iou in zip(class_names_no_void, mean_acc_no_void, mean_iou_no_void):
         wandb.log({f"eval/metrics/acc/{class_name}": acc}, step=epoch)                
         wandb.log({f"eval/metrics/iou/{class_name}": iou}, step=epoch)
         
-    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_acc, mean_iou]):
+    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_acc_no_void, mean_iou_no_void]):
         # Create a wandb.Table with columns for class names and metric values
-        table_data = list(zip(class_names, metric_values))
+        table_data = list(zip(class_names_no_void, metric_values))
         table = wandb.Table(data=table_data, columns=["class", metric_name])
 
         # Create a bar graph using wandb.plot.bar
@@ -138,10 +160,11 @@ def test(model:nn.Module,
         
     wandb.log({"eval/images": visual_pred_list}, step=epoch)
     
-    return mean_acc.mean(), mean_iou.mean()
+    return mean_acc_no_void.mean(), mean_iou_no_void.mean()
             
 def train(model:nn.Module, 
           train_dataloader:Iterable, 
+          criterion,
           optimizer:Optimizer, 
           epoch:int,
           max_batches:int=None):
@@ -150,16 +173,17 @@ def train(model:nn.Module,
     pbar = tqdm(total=max_batches)
     pbar.set_description(f"train epoch {epoch}")
     
+    loss_acum = 0.0
     for bidx, data in enumerate(train_dataloader):
         image, gt = data
         
-        gt = gt.squeeze().to(device)
         image = image.to(device)
+        gt = gt.squeeze().to(device)
         
         pred = model(image)["out"]    
                                
-        loss = F.cross_entropy(pred, gt.long())
-        wandb.log({"train/loss/cross_entropy": loss.item()}, step=epoch)
+        loss = criterion(pred, gt.long())
+        loss_acum += loss.item()
                
         optimizer.zero_grad()
         loss.backward()
@@ -171,9 +195,12 @@ def train(model:nn.Module,
         if bidx + 1 == max_batches:
             break              
         
+    wandb.log({"train/loss/cross_entropy": loss_acum / max_batches}, step=epoch)
+        
 def loop(model:nn.Module,
          train_dataloader:Iterable, 
          test_dataloader:Iterable, 
+         criterion,
          optimizer:Optimizer,
          lr_scheduler:_LRScheduler,
          epochs:int,
@@ -182,7 +209,7 @@ def loop(model:nn.Module,
     best_score = 0.
     for epoch in range(epochs):
         model.train()
-        train(model, train_dataloader, optimizer, epoch, max_batches)
+        train(model, train_dataloader, criterion, optimizer, epoch, max_batches)
         if epoch % 5 != 0:
             continue
         model.eval()
@@ -193,7 +220,10 @@ def loop(model:nn.Module,
             print("[INFO] Better weights found! Saving them...")
             save_dir = os.path.join(wandb.run.dir, "weights")
             os.makedirs(save_dir, exist_ok=True)
-            torch.save(model, os.path.join(save_dir, "best.pth"))
+            torch.save({"model": model.state_dict(),
+                        "epoch": epoch,
+                        "optimizer": optimizer.state_dict()}, 
+                       os.path.join(save_dir, "best.pth"))
         clear_cache()
 
 def main(args):
@@ -203,34 +233,58 @@ def main(args):
     
     set_determinism()
     
+    if DatasetType[args.dataset_type] == DatasetType.GTA5:
+        from gta_dataset import get_dataloader
+    elif DatasetType[args.dataset_type] == DatasetType.CITYSCAPES:
+        from cityscapes_dataset import get_dataloader
+    
     train_dataloader = get_dataloader(args.dataset_path, 
                                       split="train", 
                                       batch_size=args.batch_size,
-                                      nworkers=args.nworkers)
+                                      nworkers=args.nworkers,
+                                      filter_labels=args.filter_labels)
     test_dataloader = get_dataloader(args.dataset_path, 
                                      split="val", 
                                      batch_size=args.batch_size, 
-                                     nworkers=args.nworkers)
+                                     nworkers=args.nworkers,
+                                     filter_labels=args.filter_labels)
     
     num_classes = len(train_dataloader.dataset.CLASSES)
     model = deeplabv3_resnet101(num_classes=num_classes, 
                                 weights_backbone=ResNet101_Weights.IMAGENET1K_V1)
+    # if torch.cuda.device_count() > 1:
+    #     model = nn.DataParallel(model)
     model.to(device)
     
-    optimizer = Adam(model.parameters(), lr=args.lr)
+    # optimizer = Adam(model.parameters(), lr=args.lr)
+    optimizer = SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=10)
     
+    class_weights = torch.tensor(train_dataloader.dataset.CLASS_WEIGHTS, device=device)
+    criterion = nn.CrossEntropyLoss(weight=class_weights)
+    
     wandb.init(project="Deeplabv3",
-               name=args.exp)   
+               name=args.exp,
+               tags=["train"])  
+    wandb.run.log_code(".")
     
     loop(model, 
          train_dataloader, 
          test_dataloader, 
+         criterion,
          optimizer, 
          lr_scheduler, 
          args.epochs,
          max_batches=args.max_batches)
     
+class DatasetType(Enum):
+    GTA5 = auto()
+    CITYSCAPES = auto()
+    
+    @classmethod
+    def options(self):
+        return [var.name for var in list(self)]    
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("-e", "--exp", 
@@ -240,6 +294,11 @@ def parse_args():
                         required=True,
                         type=str,
                         help="Path to the dataset.")
+    parser.add_argument("--dataset_type", 
+                        type=str,
+                        default=DatasetType.GTA5.name,
+                        choices=DatasetType.options(), 
+                        help="Dataset to train with.")      
     parser.add_argument("--lr", 
                         default=1e-4,
                         type=float,
@@ -263,7 +322,10 @@ def parse_args():
     parser.add_argument("--device", 
                         type=str,
                         default="cuda:0", 
-                        help="Which device to use for the training.")       
+                        help="Which device to use for the training.")  
+    parser.add_argument("--filter_labels", 
+                        action="store_true",
+                        help="Whether to remove labels with small area.")           
     return parser.parse_args()    
 
 if __name__ == "__main__":
