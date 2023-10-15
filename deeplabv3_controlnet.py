@@ -44,13 +44,15 @@ class Config(object):
     #NOTE hardcoded prompt
     PROMPT = ""
     # input shape
-    CNET_INSHAPE = (769,769)
+    CNET_INSHAPE = (768,768)
     DEEPLAB_INSHAPE = (769,769)
     # normalization values
     CNET_MEAN = np.array([0.5, 0.5, 0.5], dtype=np.float32) # convert [0,1]➙[-1,1]
     CNET_STD  = np.array([0.5, 0.5, 0.5], dtype=np.float32)
-    DEEPLAB_MEAN = np.array([0.28689553, 0.32513301, 0.28389176], dtype=np.float32) 
-    DEEPLAB_STD  = np.array([0.18696375, 0.19017339, 0.18720214], dtype=np.float32) 
+    # DEEPLAB_MEAN = np.array([0.28689553, 0.32513301, 0.28389176], dtype=np.float32) # cityscapes norm
+    # DEEPLAB_STD  = np.array([0.18696375, 0.19017339, 0.18720214], dtype=np.float32) 
+    DEEPLAB_MEAN = np.array([0.42935305, 0.42347938, 0.40977437], dtype=np.float32) # gta norm
+    DEEPLAB_STD  = np.array([0.25669742, 0.25097305, 0.24708469], dtype=np.float32) 
 
 def set_determinism():
     # set seed, to be deterministic
@@ -77,7 +79,7 @@ def get_canny(image):
 def tensor2imgs(tensor):
     #NOTE: tensor must be in range (0,1)
     image = tensor.detach().permute(0, 2, 3, 1).cpu().numpy()
-    return (image[...,0] * 255).astype("uint8")        
+    return (image * 255).astype("uint8")        
 
 def test(cnet_aug,
          eval_model,
