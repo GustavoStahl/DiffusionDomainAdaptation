@@ -80,7 +80,8 @@ class GTA5C19Dataset(Dataset):
                  transform=None, 
                  target_transform=None, 
                  pair_transform=None,
-                 filter_labels=False):
+                 filter_labels=False,
+                 first_n_samples=None):
         assert split in ("train", "val", "test"), "invalid split informed."
         
         #NOTE: map extra indexes to 'void'
@@ -98,6 +99,9 @@ class GTA5C19Dataset(Dataset):
         self.label_dir = os.path.join(root_dir, "labels", split)
         self.image_filenames = sorted(os.listdir(self.image_dir), 
                                       key=lambda n: int(os.path.splitext(os.path.basename(n))[0]))
+        
+        if first_n_samples is not None:
+            self.image_filenames = self.image_filenames[:first_n_samples]
                 
         self.transform = transform
         self.pair_transform = pair_transform
@@ -147,7 +151,8 @@ def get_dataloader(dataset_path:str,
                    batch_size:int=1, 
                    nworkers:int=0, 
                    filter_labels:bool=False,
-                   mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None): 
+                   mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None,
+                   first_n_samples:int=None): 
       
     if mean_and_std is None:
         mean = (0.42935305, 0.42347938, 0.40977437) #NOTE: computed from the training dataset
@@ -184,7 +189,8 @@ def get_dataloader(dataset_path:str,
                              transform, 
                              target_transform, 
                              pair_transform, 
-                             filter_labels)
+                             filter_labels,
+                             first_n_samples)
     dataloader = DataLoader(dataset, 
                             batch_size=batch_size, 
                             shuffle=True if split == "train" else False,
@@ -208,3 +214,18 @@ if __name__ == "__main__":
                                 nworkers=8,
                                 batch_size=4,
                                 filter_labels=True)
+    from tqdm import tqdm
+    for bidx, data in enumerate(tqdm(dataloader)):
+        image, label = data
+        if 16 not in label:
+            continue
+        os.makedirs("../results/gta_trains/", exist_ok=True)
+        ts.save(image, f"../results/gta_trains/train_image_{bidx}.png")
+        # ts.save(label, "../results/gta_dataset_label.png")
+        # if bidx < 179: continue
+        # if 18 not in label: continue
+        # Image.fromarray(np.take(GTA5C19Dataset.PALETTE, label[0].squeeze().numpy(), axis=0).astype("uint8")).save(f"../results/gta_dataset_bicycle_{bicycle_count}.png")
+        # bicycle_count += 1
+        # if bicycle_count >= 8:
+        # break
+        # import pdb; pdb.set_trace()
