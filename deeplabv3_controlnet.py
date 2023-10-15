@@ -464,8 +464,16 @@ def main(args):
     else:
         eval_model = deeplab_ckpt
         
-    eval_model.to(device)
+    for param in eval_model.parameters():
+        param.requires_grad = False
         
+    if args.deeplab_mode == "eval":
+        eval_model.eval()
+    elif args.deeplab_mode == "train":
+        eval_model.train()
+        
+    eval_model.to(device)
+    
     optimizer = AdamW(augmentation_model.get_trainable_params(), lr=args.lr)
     lr_scheduler = ReduceLROnPlateau(optimizer, mode="max", factor=0.5, verbose=True) # new_lr = lr * factor
     
