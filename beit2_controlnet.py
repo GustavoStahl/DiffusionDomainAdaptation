@@ -161,11 +161,11 @@ def test(cnet_aug,
         # compute baselines
         if first_epoch:
             with torch.no_grad():
-                eval_model_pred = eval_model(img=[beit_normalize(beit_bilinear_resize(image))], 
+                base_eval_model_pred = eval_model(img=[beit_normalize(beit_bilinear_resize(image))], 
                                              img_metas=[metas], 
                                              return_loss=False)
                 
-            base_metrics = eval_metrics(eval_model_pred,
+            base_metrics = eval_metrics(base_eval_model_pred,
                                         gt_numpy,
                                         len(class_names),
                                         0,
@@ -195,7 +195,7 @@ def test(cnet_aug,
             cnet_list.append(wandb.Image(im_color, masks=masks))
             
         if first_epoch:
-            for im_color, pred_mask, true_mask in zip(image_color, eval_model_pred, gt_numpy):
+            for im_color, pred_mask, true_mask in zip(image_color, base_eval_model_pred, gt_numpy):
                 class_labels = {i:c for (i,c) in enumerate(class_names)}
                 
                 true_mask = cv2.resize(true_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
