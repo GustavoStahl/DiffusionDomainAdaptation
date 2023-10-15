@@ -134,21 +134,27 @@ def test(model:nn.Module,
                                         nan_to_num=0,
                                         beta=1)       
            
-    mean_acc = ret_metrics["Acc"]
-    mean_iou = ret_metrics["IoU"]          
+    mean_accs = ret_metrics["Acc"]
+    mean_ious = ret_metrics["IoU"]       
         
     # Remove the void class from the metrics
-    mean_acc_no_void = np.delete(mean_acc, void_idx)
-    mean_iou_no_void = np.delete(mean_iou, void_idx)
-    class_names_no_void = list(np.delete(np.array(class_names, dtype=object), void_idx))
+    mean_accs = np.delete(mean_accs, void_idx)
+    mean_ious = np.delete(mean_ious, void_idx)
+    class_names = list(np.delete(np.array(class_names, dtype=object), void_idx))
         
-    for class_name, acc, iou in zip(class_names_no_void, mean_acc_no_void, mean_iou_no_void):
+    for class_name, acc, iou in zip(class_names, mean_accs, mean_ious):
         wandb.log({f"eval/metrics/acc/{class_name}": acc}, step=epoch)                
         wandb.log({f"eval/metrics/iou/{class_name}": iou}, step=epoch)
         
-    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_acc_no_void, mean_iou_no_void]):
+    mean_acc, mean_iou = mean_accs.mean(), mean_ious.mean()
+    wandb.define_metric("eval/metrics/macc", summary="max")
+    wandb.define_metric("eval/metrics/miou", summary="max")
+    wandb.log({"eval/metrics/macc": mean_acc}, step=epoch)                
+    wandb.log({"eval/metrics/miou": mean_iou}, step=epoch)        
+        
+    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_accs, mean_ious]):
         # Create a wandb.Table with columns for class names and metric values
-        table_data = list(zip(class_names_no_void, metric_values))
+        table_data = list(zip(class_names, metric_values))
         table = wandb.Table(data=table_data, columns=["class", metric_name])
 
         # Create a bar graph using wandb.plot.bar
@@ -160,7 +166,7 @@ def test(model:nn.Module,
         
     wandb.log({"eval/images": visual_pred_list}, step=epoch)
     
-    return mean_acc_no_void.mean(), mean_iou_no_void.mean()
+    return mean_acc, mean_iou
             
 def train(model:nn.Module, 
           train_dataloader:Iterable, 

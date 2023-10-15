@@ -16,6 +16,7 @@ from tqdm import tqdm
 
 import numpy as np
 import cv2
+import os
 
 from enum import Enum, auto
 
@@ -116,21 +117,21 @@ def test(model:nn.Module,
                                         nan_to_num=0,
                                         beta=1)       
            
-    mean_acc = ret_metrics["Acc"]
-    mean_iou = ret_metrics["IoU"]       
+    mean_accs = ret_metrics["Acc"]
+    mean_ious = ret_metrics["IoU"]       
         
     # Remove the void class from the metrics
-    mean_acc_no_void = np.delete(mean_acc, void_idx)
-    mean_iou_no_void = np.delete(mean_iou, void_idx)
-    class_names_no_void = list(np.delete(np.array(class_names, dtype=object), void_idx))
+    mean_accs = np.delete(mean_accs, void_idx)
+    mean_ious = np.delete(mean_ious, void_idx)
+    class_names = list(np.delete(np.array(class_names, dtype=object), void_idx))
         
-    for class_name, acc, iou in zip(class_names_no_void, mean_acc_no_void, mean_iou_no_void):
+    for class_name, acc, iou in zip(class_names, mean_accs, mean_ious):
         wandb.log({f"eval/metrics/acc/{class_name}": acc}, step=epoch)                
         wandb.log({f"eval/metrics/iou/{class_name}": iou}, step=epoch)
         
-    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_acc_no_void, mean_iou_no_void]):
+    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_accs, mean_ious]):
         # Create a wandb.Table with columns for class names and metric values
-        table_data = list(zip(class_names_no_void, metric_values))
+        table_data = list(zip(class_names, metric_values))
         table = wandb.Table(data=table_data, columns=["class", metric_name])
 
         # Create a bar graph using wandb.plot.bar
@@ -153,6 +154,8 @@ def main(args):
         from gta_dataset import get_dataloader
     elif DatasetType[args.dataset_type] == DatasetType.CITYSCAPES:
         from cityscapes_dataset import get_dataloader
+    elif DatasetType[args.dataset_type] == DatasetType.KITTI:
+        from kitti_dataset import get_dataloader
     
     test_dataloader = get_dataloader(args.dataset_path, 
                                      split=args.dataset_split, 
@@ -176,13 +179,15 @@ def main(args):
     
     wandb.init(project="Deeplabv3",
                name=f"{args.exp}_{args.dataset_type}_{args.dataset_split}",
-               tags=["test"])   
+               tags=["test"],
+               dir=os.environ.get("WANDB_DIR"))   
     
     test(model, test_dataloader, epoch=epoch)
     
 class DatasetType(Enum):
     GTA5 = auto()
     CITYSCAPES = auto()
+    KITTI = auto()
     
     @classmethod
     def options(self):
@@ -203,14 +208,13 @@ def parse_args():
                         help="Path to the dataset.")
     parser.add_argument("--dataset_split", 
                         default="val",
-                        choices=["test", "val"],
                         type=str,
                         help="Which split to use.")      
     parser.add_argument("--dataset_type", 
                         type=str,
                         default=DatasetType.GTA5.name,
                         choices=DatasetType.options(), 
-                        help="Dataset to train with.")      
+                        help="Dataset to eval with.")      
     parser.add_argument("--batch_size", 
                         type=int,
                         default=8, 
