@@ -35,7 +35,7 @@ import matplotlib; matplotlib.use("Agg")
 from dataclasses import dataclass
 
 from torchvision.models.segmentation import deeplabv3_resnet101
-from deeplab.cityscapes_dataset import get_dataloader
+from deeplab.cityscapes_dataset import get_dataloader, ConditionType
 
 device = None
 
@@ -64,17 +64,6 @@ def set_determinism():
 def clear_cache():
     gc.collect()
     torch.cuda.empty_cache()  
-    
-def get_canny(image):
-    # Get canny edges from input image
-    canny_guide = np.empty((len(image), *image[0].shape[:2]), dtype=np.float32)
-    for idx, im_color in enumerate(image):
-        #NOTE: this expects BGR
-        canny = cv2.Canny(im_color, 50, 100)
-        # normalize between [0., 1.]
-        canny_norm = canny.astype("float32") / 255.
-        canny_guide[idx] = canny_norm
-    return canny_guide
 
 def tensor2imgs(tensor):
     #NOTE: tensor must be in range (0,1)
@@ -90,6 +79,9 @@ def test(cnet_aug,
     prompt = Config.PROMPT
     cnet_normalize = Normalize(Config.CNET_MEAN, Config.CNET_STD)
     deeplab_normalize = Normalize(Config.DEEPLAB_MEAN, Config.DEEPLAB_STD)
+    cnet_bilinear_resize = lambda x: x # Resize(Config.CNET_INSHAPE, InterpolationMode.BILINEAR)
+    cnet_nearest_resize = lambda x: x # Resize(Config.CNET_INSHAPE, InterpolationMode.NEAREST)    
+    deeplab_bilinear_resize = lambda x: x # Resize(Config.DEEPLAB_INSHAPE, InterpolationMode.BILINEAR)        
         
     class_names = test_dataloader.dataset.CLASSES
     void_idx = test_dataloader.dataset.VOID_IDX
@@ -105,7 +97,7 @@ def test(cnet_aug,
     cnet_list = []
     if first_epoch:
         rgb_list = []
-        canny_list = []
+        condition_list = []
         base_total_area_intersect = torch.zeros((num_classes, ), dtype=torch.float64)
         base_total_area_union = torch.zeros((num_classes, ), dtype=torch.float64)
         base_total_area_pred_label = torch.zeros((num_classes, ), dtype=torch.float64)
@@ -122,33 +114,29 @@ def test(cnet_aug,
         # garbage collector
         clear_cache()       
         
-        image, gt = data # RGB, float32, (769x769), norm [0,1]
-                                            
-        image_color = tensor2imgs(image) # uint8
-        
-        image_color_bgr = image_color[...,::-1] # RGB➙BGR
-        canny_guide = get_canny(image_color_bgr)
-        canny_guide = torch.from_numpy(canny_guide)[:,None]
-        canny_guide = torch.repeat_interleave(canny_guide, 3, dim=1) # (B, 1, H, W) -> (B, 3, H, W)
+        image, gt, condition = data # RGB, float32, (769x769), norm [0,1]
+                                                    
+        condition = (condition.float() / 255)
+        condition = torch.repeat_interleave(condition, 3, dim=1) # (B, 1, H, W) -> (B, 3, H, W)
                                 
         image = image.to(device)
-        canny_guide = canny_guide.to(device)
+        condition = condition.to(device)
         
         # normalize [0,1]➙[-1,1]
-        image_norm = cnet_normalize(image)
+        image_rsz = cnet_bilinear_resize(image)
+        condition_rsz = cnet_nearest_resize(condition)
+        image_rsz_norm = cnet_normalize(image_rsz)
                                             
         #NOTE: this expects RGB
         with torch.no_grad():
-            diffusion_pred, *_ = cnet_aug(image_norm, canny_guide, prompt)
+            diffusion_pred, *_ = cnet_aug(image_rsz_norm, condition_rsz, prompt)
                                 
-        diffusion_pred_norm = deeplab_normalize(diffusion_pred)  
-            
-        diffusion_color = diffusion_pred.detach().permute(0, 2, 3, 1).cpu().numpy()
-        diffusion_color = (diffusion_color * 255).astype("uint8")
-                        
+        diffusion_pred_rsz = deeplab_bilinear_resize(diffusion_pred)
+        diffusion_pred_rsz_norm = deeplab_normalize(diffusion_pred_rsz)  
+                                    
         with torch.no_grad():
             #NOTE: this expects RGB
-            pred = eval_model(diffusion_pred_norm)["out"]
+            pred = eval_model(diffusion_pred_rsz_norm)["out"]        
                                 
         pred_classes = pred.argmax(1).cpu().numpy()
         gt = gt.squeeze().numpy()  
@@ -164,11 +152,13 @@ def test(cnet_aug,
         total_area_union += area_union
         total_area_pred_label += area_pred_label
         total_area_label += area_label
-        
+
         # compute baselines
         if first_epoch:
             with torch.no_grad():
-                eval_model_pred = eval_model([deeplab_normalize(deeplab_bilinear_resize(image))])["out"]
+                pred = eval_model(deeplab_normalize(image))["out"]
+                
+            base_pred_classes = pred.argmax(1).cpu().numpy()
                 
             base_area_intersect, base_area_union, \
             base_area_pred_label, base_area_label = total_intersect_and_union(pred_classes, 
@@ -189,33 +179,49 @@ def test(cnet_aug,
             if bidx + 1 == max_batches:
                 break
             continue
+        
+        diffusion_rsz_color = diffusion_pred_rsz.detach().permute(0, 2, 3, 1).cpu().numpy()
+        diffusion_rsz_color = (diffusion_rsz_color * 255).astype("uint8")
                                        
-        for im_color, pred_mask, true_mask in zip(diffusion_color, eval_model_pred, gt):
+        for im_color, pred_mask, true_mask in zip(diffusion_rsz_color, pred_classes, gt):
             class_labels = {i:c for (i,c) in enumerate(class_names)}
             
-            true_mask = cv2.resize(true_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
-            pred_mask = cv2.resize(pred_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
+            pred_mask = pred_mask.astype("uint8")
+            true_mask = true_mask.astype("uint8")
             
+            height = im_color.shape[0]
+            scale_target = 384 / height
+            im_color = cv2.resize(im_color, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_LINEAR)
+            pred_mask = cv2.resize(pred_mask, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_NEAREST)
+            true_mask = cv2.resize(true_mask, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_NEAREST)                        
+                        
             masks = {"prediction": {"mask_data": pred_mask, "class_labels": class_labels}, 
                      "ground_truth": {"mask_data": true_mask, "class_labels": class_labels}}
             
             cnet_list.append(wandb.Image(im_color, masks=masks))
             
         if first_epoch:
-            for im_color, pred_mask, true_mask in zip(image_color, eval_model_pred, gt_numpy):
+            image_color = tensor2imgs(image) # uint8
+            for im_color, pred_mask, true_mask in zip(image_color, base_pred_classes, gt):
                 class_labels = {i:c for (i,c) in enumerate(class_names)}
                 
-                true_mask = cv2.resize(true_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
-                pred_mask = cv2.resize(pred_mask.astype("uint8"), Config.CNET_INSHAPE, interpolation=cv2.INTER_LINEAR)
+                pred_mask = pred_mask.astype("uint8")
+                true_mask = true_mask.astype("uint8")
+                
+                height = im_color.shape[0]
+                scale_target = 384 / height
+                im_color = cv2.resize(im_color, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_LINEAR)
+                pred_mask = cv2.resize(pred_mask, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_NEAREST)
+                true_mask = cv2.resize(true_mask, (None, None), fx=scale_target, fy=scale_target, interpolation=cv2.INTER_NEAREST)
                 
                 masks = {"prediction": {"mask_data": pred_mask, "class_labels": class_labels}, 
                          "ground_truth": {"mask_data": true_mask, "class_labels": class_labels}}
                 
-                rgb_list.append(wandb.Image(im_color[...,::-1], masks=masks))
+                rgb_list.append(wandb.Image(im_color, masks=masks))
 
-            canny_color = canny_guide.detach().permute(0, 2, 3, 1).cpu().numpy()
-            canny_color = (canny_color[...,0] * 255).astype("uint8")
-            canny_list.extend([wandb.Image(canny) for canny in canny_guide])            
+            condition_color = condition.detach().permute(0, 2, 3, 1).cpu().numpy()
+            condition_color = (condition_color * 255).astype("uint8")
+            condition_list.extend([wandb.Image(cond) for cond in condition])            
 
         clear_cache()
         pbar.update(1)
@@ -232,14 +238,24 @@ def test(cnet_aug,
                                         nan_to_num=0,
                                         beta=1)       
            
-    mean_acc = ret_metrics["Acc"]
-    mean_iou = ret_metrics["IoU"]  
+    mean_accs, mean_ious = ret_metrics["Acc"], ret_metrics["IoU"]
     
-    for class_name, acc, iou in zip(class_names, mean_acc, mean_iou):
+    # Remove the void class from the metrics
+    mean_accs = np.delete(mean_accs, void_idx)
+    mean_ious = np.delete(mean_ious, void_idx)
+    class_names = list(np.delete(np.array(class_names, dtype=object), void_idx))
+    
+    for class_name, acc, iou in zip(class_names, mean_accs, mean_ious):
         wandb.log({f"eval/metrics/acc/{class_name}": acc}, step=epoch)                
         wandb.log({f"eval/metrics/iou/{class_name}": iou}, step=epoch)
         
-    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_acc, mean_iou]):
+    mean_acc, mean_iou = mean_accs.mean(), mean_ious.mean()
+    wandb.define_metric("eval/metrics/macc", summary="max")
+    wandb.define_metric("eval/metrics/miou", summary="max")
+    wandb.log({"eval/metrics/macc": mean_acc}, step=epoch)                
+    wandb.log({"eval/metrics/miou": mean_iou}, step=epoch)
+        
+    for metric_name, metric_values in zip(["Acc", "IoU"], [mean_accs, mean_ious]):
         # Create a wandb.Table with columns for class names and metric values
         table_data = list(zip(class_names, metric_values))
         table = wandb.Table(data=table_data, columns=["class", metric_name])
@@ -254,7 +270,7 @@ def test(cnet_aug,
     wandb.log({"eval/images/cnet": cnet_list}, step=epoch)
     # log baselines
     if first_epoch:
-        wandb.log({"eval/images/canny": canny_list}, step=epoch)            
+        wandb.log({"eval/images/condition": condition_list}, step=epoch)            
         wandb.log({"baseline/images/raw": rgb_list}, step=epoch)
         
         base_ret_metrics = total_area_to_metrics(base_total_area_intersect, 
@@ -265,9 +281,9 @@ def test(cnet_aug,
                                                  nan_to_num=0,
                                                  beta=1)       
             
-        base_mean_acc = base_ret_metrics["Acc"]
-        base_mean_iou = base_ret_metrics["IoU"]  
-        for metric_name, metric_values in zip(["Acc", "IoU"], [base_mean_acc, base_mean_iou]):
+        base_mean_accs = base_ret_metrics["Acc"]
+        base_mean_ious = base_ret_metrics["IoU"]  
+        for metric_name, metric_values in zip(["Acc", "IoU"], [base_mean_accs, base_mean_ious]):
             # Create a wandb.Table with columns for class names and metric values
             table_data = list(zip(class_names, metric_values))
             table = wandb.Table(data=table_data, columns=["class", metric_name])
@@ -279,7 +295,7 @@ def test(cnet_aug,
             topic_name = f"baseline/metrics/{metric_name.lower()}"
             wandb.log({f"{topic_name}_plot": plot}, step=epoch)  
             
-    return mean_acc.mean(), mean_iou.mean()
+    return mean_acc, mean_iou
            
 def train(cnet_aug,
           eval_model, 
@@ -293,6 +309,9 @@ def train(cnet_aug,
     prompt = Config.PROMPT
     cnet_normalize = Normalize(Config.CNET_MEAN, Config.CNET_STD)
     deeplab_normalize = Normalize(Config.DEEPLAB_MEAN, Config.DEEPLAB_STD)
+    cnet_bilinear_resize = Resize(Config.CNET_INSHAPE, InterpolationMode.BILINEAR)
+    cnet_nearest_resize = Resize(Config.CNET_INSHAPE, InterpolationMode.NEAREST)    
+    deeplab_bilinear_resize = Resize(Config.DEEPLAB_INSHAPE, InterpolationMode.BILINEAR)    
         
     use_ssim = False
     if use_ssim:
@@ -316,39 +335,35 @@ def train(cnet_aug,
     pbar.set_description(f"train epoch {epoch}")
     for bidx, data in enumerate(train_dataloader):
         
-        assert len(data) == 2
+        assert len(data) == 3
 
         # garbage collector
         clear_cache()  
+                
+        image, gt, condition = data # RGB, float32, (769x769), norm [0,1]
         
-        #TODO 1. resize dataset for the resoltuion of 512 x 960
-        #TODO 2. normalize dataset for mean 0.5 and std 0.5
-        #TODO 3. normalize controlnet output by GTA dataset's mean and std
-        
-        image, gt = data # RGB, float32, (769x769), norm [0,1]
-        
-        image_color_bgr = tensor2imgs(image)[...,::-1] # RGB➙BGR, uint8
-        
-        canny_guide = get_canny(image_color_bgr)
-        canny_guide = torch.from_numpy(canny_guide)[:,None]
-        canny_guide = torch.repeat_interleave(canny_guide, 3, dim=1) # (B, 1, H, W) -> (B, 3, H, W)
-                                
-        gt = gt.to(device)
+        condition = (condition.float() / 255)
+        condition = torch.repeat_interleave(condition, 3, dim=1) # (B, 1, H, W) -> (B, 3, H, W)
+               
         image = image.to(device)
-        canny_guide = canny_guide.to(device)
+        gt = gt.squeeze().to(device)
+        condition = condition.to(device)
         
         # normalize [0,1]➙[-1,1]
-        image_norm = cnet_normalize(image)
+        image_rsz = cnet_bilinear_resize(image)
+        condition_rsz = cnet_nearest_resize(condition)
+        image_rsz_norm = cnet_normalize(image_rsz)
                                             
         #NOTE: this expects RGB
-        diffusion_pred, denoise_loss, backward_helper = cnet_aug(image_norm, canny_guide, prompt)
+        diffusion_pred, denoise_loss, backward_helper = cnet_aug(image_rsz_norm, condition_rsz, prompt)
         # ts.save(diffusion_pred, f"results/{cnet_aug.scheduler.__class__.__name__}_{cnet_aug.num_inference_steps}.png")
         # import sys; sys.exit("Finishing...")
                                 
-        diffusion_pred_norm = deeplab_normalize(diffusion_pred)  
+        diffusion_pred_rsz = deeplab_bilinear_resize(diffusion_pred)
+        diffusion_pred_rsz_norm = deeplab_normalize(diffusion_pred_rsz)  
             
         #NOTE: this expects RGB
-        pred = eval_model(diffusion_pred_norm)["out"]
+        pred = eval_model(diffusion_pred_rsz_norm)["out"]
         
         ce_loss = criterion(pred, gt.long())
         accum_metric(metrics_tracker, "losses/cross_entropy_loss", ce_loss.item())
@@ -356,10 +371,10 @@ def train(cnet_aug,
         total_loss = ce_loss
                 
         if use_ssim:
-            similarity_loss = similarity_loss_func(diffusion_pred, image)
+            similarity_loss = similarity_loss_func(diffusion_pred, image_rsz)
             accum_metric(metrics_tracker, "losses/similarity_loss", similarity_loss.item())
             total_loss += similarity_loss
-                                                
+        
         optimizer.zero_grad(set_to_none=True)
         total_loss.backward(retain_graph=False) # free the vae and the segmenter
         
@@ -401,14 +416,12 @@ def loop(cnet_aug,
          max_batches=None,
          no_eval=False):
     
-    best_score = 0.
+    best_score = 0.    
     for epoch in range(epochs):
-        eval_model.train()
         cnet_aug.set_train()
         train(cnet_aug, eval_model, train_dataloader, criterion, optimizer, epoch, diffusion_loss_alpha, max_batches=max_batches)
         if epoch % 10 != 0 or no_eval:
             continue
-        eval_model.eval()
         cnet_aug.set_eval()
         acc, iou = test(cnet_aug, eval_model, test_dataloader, epoch, max_batches=max_batches)
         eval_score = (acc + iou) / 2.
@@ -425,18 +438,22 @@ def main(args):
     set_determinism()
     
     mean_and_std = ((0., 0., 0.), (1., 1., 1.)) # Set normalization in range (0,1)
+    condition_type = ConditionType[args.condition_type]
     train_dataloader = get_dataloader(args.dataset_path, 
                                       split="train", 
                                       batch_size=args.batch_size,
                                       nworkers=args.nworkers,
                                       filter_labels=args.filter_labels,
-                                      mean_and_std=mean_and_std)
+                                      mean_and_std=mean_and_std,
+                                      first_n_samples=args.first_n_samples,
+                                      condition_type=condition_type)
     test_dataloader = get_dataloader(args.dataset_path, 
                                      split="val", 
                                      batch_size=args.batch_size, 
                                      nworkers=args.nworkers,
                                      filter_labels=args.filter_labels,
-                                     mean_and_std=mean_and_std)
+                                     mean_and_std=mean_and_std,
+                                     condition_type=condition_type)
     
     scheduler_type = SchedulerType[args.scheduler]
     denoise_type = DenoiseType[args.denoise]
@@ -484,7 +501,8 @@ def main(args):
     torch.backends.cuda.matmul.allow_tf32 = True
     
     wandb.init(project="Deeplabv3andCNet",
-               name=args.exp)   
+               name=args.exp,
+               dir=os.environ.get("WANDB_DIR"))
     wandb.run.log_code(".")
     
     loop(augmentation_model,
@@ -508,6 +526,11 @@ def parse_args():
                         required=True,
                         type=str,
                         help="Path to DeepLabv3 pretrained weights.")   
+    parser.add_argument("--deeplab_mode", 
+                        type=str,
+                        default="eval",
+                        choices=["eval", "train"],
+                        help="Which mode to use with DeepLabv3")    
     parser.add_argument("--dataset_path", 
                         required=True,
                         type=str,
@@ -528,13 +551,22 @@ def parse_args():
                         type=int,
                         default=None, 
                         help="Number of samples in batch.")   
+    parser.add_argument("--first_n_samples", 
+                        type=int,
+                        default=None, 
+                        help="Take only the first N samples of the dataset.")       
     parser.add_argument("--nworkers", 
                         type=int,
                         default=0, 
                         help="Number of workers for the dataloader.")       
     parser.add_argument("--filter_labels", 
                         action="store_true",
-                        help="Whether to remove labels with small area.")                             
+                        help="Whether to remove labels with small area.")      
+    parser.add_argument("--condition_type", 
+                        type=str,
+                        default=ConditionType.NONE.name,
+                        choices=ConditionType.options(), 
+                        help="Which condition to use in ControlNet.")                        
     parser.add_argument("--cnet_ckpt", 
                         default="lllyasviel/control_v11p_sd15_canny", 
                         help="ControlNet cpkt path.")   
