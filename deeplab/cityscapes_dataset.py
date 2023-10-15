@@ -10,10 +10,23 @@ from torchvision.transforms import (ToTensor,
 import cv2
 import albumentations as A
 
+import os
+
 import numpy as np
 from PIL import Image
 
 from typing import Tuple
+from enum import Enum, auto
+
+class ConditionType(Enum):
+    NONE = auto()
+    CANNY = auto()
+    SAM = auto()
+    CANNY_AND_SAM = auto()
+    
+    @classmethod
+    def options(self):
+        return [var.name for var in list(self)]
 
 class CityscapesC19Dataset(Cityscapes):
     # Classes: 19
@@ -56,13 +69,30 @@ class CityscapesC19Dataset(Cityscapes):
     }
     VOID_IDX = 19
     
-    CLASS_WEIGHTS = [1, 1, 1,
-                     1, 1, 1,
-                     1, 1, 1,
-                     1, 1, 1,
-                     1, 1, 1,
-                     1, 1, 1,
-                     1, 0]
+    CLASS_PIXEL_FREQUENCY = [678075191, 87281060,  313104171,  
+                             10040422,  13453001,  21293041,   
+                             3168423,   9083284,   242893520,  
+                             17065188,  48245276,  26570178,   
+                             3190590,   131114292, 4619678,   
+                             5812564,   5272930,   1884932,   
+                             8325041,   110474002]
+    
+    # class_weights = 1/log(1.02 + (class_frequencies[:-1] / sum(class_frequencies[:-1])))
+    CLASS_WEIGHTS = [ 2.76, 14.09,  5.20, 
+                     38.73, 35.89, 30.75, 
+                     46.07, 39.60,  6.41, 
+                     33.32, 20.66, 28.05, 
+                     46.04, 10.45, 44.29, 
+                     42.93, 43.54, 47.77, 
+                     40.33,   0.0]
+    
+    # CLASS_WEIGHTS = [1., 1., 1.,
+    #                  1., 1., 1.,
+    #                  1., 1., 1.,
+    #                  1., 1., 1.,
+    #                  1., 1., 1.,
+    #                  1., 1., 1.,
+    #                  1., 0.]
     
     def __init__(self, 
                  root,
@@ -71,9 +101,11 @@ class CityscapesC19Dataset(Cityscapes):
                  target_transform=None,
                  transforms=None,
                  pair_transform=None,
-                 filter_labels=False):
+                 filter_labels=False,
+                 first_n_samples=None,
+                 condition_type:ConditionType=ConditionType.NONE):
         super().__init__(root, split, "fine", "semantic", transform, target_transform, transforms)
-    
+        
         #NOTE: map extra indexes to 'void'
         map_func = lambda key: self.CITYSCAPES19IDXS.get(key, self.VOID_IDX)
         
@@ -81,9 +113,30 @@ class CityscapesC19Dataset(Cityscapes):
         LUT_cityscapes19 = np.arange(max_classes)
         LUT_cityscapes19 = np.vectorize(map_func, otypes=["uint8"])(LUT_cityscapes19).squeeze()
         
+        if first_n_samples is not None:
+            self.images = self.images[:first_n_samples]
+            self.targets = self.targets[:first_n_samples]
+            
+        if condition_type != ConditionType.NONE:
+            self.condition_files = self.get_condition_files(condition_type)
+        
         self.filter_labels = filter_labels                
         self.pair_transform = pair_transform
         self.LUT_cityscapes19 = LUT_cityscapes19
+        self.condition_type = condition_type
+        
+    def get_condition_files(self, condition_type):
+        condition_files = []
+        if condition_type in [ConditionType.SAM, ConditionType.CANNY_AND_SAM]:
+            rgb_folder = "leftImg8bit"
+            sam_folder = "leftImg8bit_SAM"
+            
+            for file_path in self.images:
+                dirname = os.path.dirname(file_path)
+                filename = os.path.basename(file_path)
+                sam_dirname = dirname.replace(rgb_folder, sam_folder)
+                condition_files.append(os.path.join(sam_dirname, filename))
+        return condition_files
         
     def convert_labels_format(self, label):
         return np.take(self.LUT_cityscapes19, label)
@@ -95,33 +148,77 @@ class CityscapesC19Dataset(Cityscapes):
             return label
         unuseful_pixels = np.isin(label, unuseful_indexes)
         label[unuseful_pixels] = self.VOID_IDX
-        return label    
+        return label 
     
-    def __getitem__(self, index):
+    def load_files(self, index):
         image = Image.open(self.images[index]).convert("RGB")
         label = Image.open(self.targets[index][0])
         
-        label = Image.fromarray(self.convert_labels_format(np.array(label)))
-        if self.filter_labels:
-            label = Image.fromarray(self.filter_unuseful_labels(np.array(label)))
+        condition = None
+        if self.condition_type == ConditionType.SAM:
+            condition = Image.open(self.condition_files[index])
+        elif self.condition_type == ConditionType.CANNY:
+            image_bgr = np.array(image)[...,::-1]
+            condition = Image.fromarray(cv2.Canny(image_bgr, 50, 100))   
+        elif self.condition_type == ConditionType.CANNY_AND_SAM:
+            image_bgr = np.array(image)[...,::-1]
+            canny_condition = cv2.Canny(image_bgr, 50, 100)   
+            sam_condition = np.array(Image.open(self.condition_files[index]).convert("L"))
+            
+            sam_canny = cv2.Canny(sam_condition, 50, 100)   
+                    
+            contours, _ = cv2.findContours(sam_condition, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            sam_contours = np.zeros_like(canny_condition)
+            cv2.drawContours(sam_contours, contours, -1, 255, thickness=1)   
+            
+            condition = (sam_contours) | (sam_canny) | (canny_condition)
+            condition = Image.fromarray(condition)
+            
+        return image, label, condition     
+    
+    def __getitem__(self, index):
+        image, label, condition = self.load_files(index)
         
         if self.pair_transform is not None:
-            pair_transformed = self.pair_transform(image=np.array(image), 
-                                                   mask=np.array(label))
-            image = Image.fromarray(pair_transformed["image"])
-            label = Image.fromarray(pair_transformed["mask"])
+            masks = [np.array(label)]
             
-        if self.transforms is not None:
-            image, label = self.transforms(image, label)
+            if self.condition_type != ConditionType.NONE:
+                masks += [np.array(condition)]
+            
+            pair_transformed = self.pair_transform(image=np.array(image), 
+                                                   masks=masks)
+            
+            image = Image.fromarray(pair_transformed["image"])
+            if self.condition_type == ConditionType.NONE:
+                label = Image.fromarray(pair_transformed["masks"][0])
+            else:
+                label, condition = [Image.fromarray(m) for m in pair_transformed["masks"]]
+            
+        label = Image.fromarray(self.convert_labels_format(np.array(label)))
+        if self.filter_labels:
+            label = Image.fromarray(self.filter_unuseful_labels(np.array(label)))            
+            
+        if self.target_transform is not None:
+            label = self.target_transform(label)
+            if self.condition_type != ConditionType.NONE:
+                condition = self.target_transform(condition)
 
-        return image, label
+        if self.transform is not None:
+            image = self.transform(image)
 
+        if self.condition_type == ConditionType.NONE:
+            return image, label
+        else:
+            return image, label, condition
+        
 def get_dataloader(dataset_path:str, 
                    split:str="train", 
                    batch_size:int=1, 
                    nworkers:int=0, 
                    filter_labels:bool=False,
-                   mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None):  
+                   mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None,
+                   first_n_samples:int=None,
+                   condition_type:ConditionType=ConditionType.NONE):  
          
     if mean_and_std is None:
         mean = (0.28689553, 0.32513301, 0.28389176) #NOTE: computed from training dataset
@@ -144,27 +241,57 @@ def get_dataloader(dataset_path:str,
     target_transform = Compose([PILToTensor()])        
     
     dataset = CityscapesC19Dataset(dataset_path, 
-                                   split=split, 
+                                   split=split,
                                    transform=transform, 
                                    target_transform=target_transform,
                                    pair_transform=pair_transform,
-                                   filter_labels=filter_labels)
+                                   filter_labels=filter_labels,
+                                   first_n_samples=first_n_samples,
+                                   condition_type=condition_type)
     dataloader = DataLoader(dataset, 
                             batch_size=batch_size, 
-                            shuffle=True if split == "train" else False,
+                            shuffle=False,#True if split == "train" else False,
                             num_workers=nworkers,
                             drop_last=True)   
     return dataloader 
 
-if __name__ == "__main__":
-    import torchshow as ts
-    dataloader = get_dataloader("/ibex/user/stahlg/datasets/cityscapes", 
-                                split="test", 
-                                batch_size=8,
-                                nworkers=4)
+def __class_frequency(dataloader):
+    label_frequency = np.zeros(len(dataloader.dataset.CLASSES), dtype=np.uint)
     from tqdm import tqdm
     for data in tqdm(dataloader):
-        continue
+        image, label = data
+        unique, counts = np.unique(label, return_counts=True)
+        label_frequency[unique] += counts.astype(np.uint)
+    return label_frequency
+
+def set_determinism():
+    # set seed, to be deterministic
+    import random, numpy as np, torch
+    seed = 123
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+
+if __name__ == "__main__":
+    import torchshow as ts
+    set_determinism()
+    dataloader = get_dataloader("/ibex/user/stahlg/datasets/cityscapes", 
+                                split="train", 
+                                batch_size=32,
+                                nworkers=8,
+                                condition_type=ConditionType.NONE)
+    label_frequency = __class_frequency(dataloader)
+    print(label_frequency)
+    exit(0)
+    from tqdm import tqdm
+    for data in tqdm(dataloader):
+        print(len(data))
+        for i, d in enumerate(data):
+            if i == 2:
+                Image.fromarray(d.numpy().squeeze()).save(f"../results/cityscapes_with_CANNY_AND_SAM_{i}.png")
+            else:
+                ts.save(d, f"../results/cityscapes_with_CANNY_AND_SAM_{i}.png")
+        break
 
         # for idx, tensor in enumerate(data):
         #     print(tensor.size())
