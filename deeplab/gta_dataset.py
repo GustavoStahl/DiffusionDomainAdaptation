@@ -1,4 +1,4 @@
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import Dataset
 from torchvision.transforms import (ToTensor, 
                                     PILToTensor, 
                                     Normalize, 
@@ -146,13 +146,11 @@ class GTA5C19Dataset(Dataset):
             
         return image, label
                 
-def get_dataloader(dataset_path:str, 
-                   split:str="train", 
-                   batch_size:int=1, 
-                   nworkers:int=0, 
-                   filter_labels:bool=False,
-                   mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None,
-                   first_n_samples:int=None): 
+def get_dataset(dataset_path:str, 
+                split:str="train", 
+                filter_labels:bool=False,
+                mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None,
+                first_n_samples:int=None): 
       
     if mean_and_std is None:
         mean = (0.42935305, 0.42347938, 0.40977437) #NOTE: computed from the training dataset
@@ -191,13 +189,8 @@ def get_dataloader(dataset_path:str,
                              pair_transform, 
                              filter_labels,
                              first_n_samples)
-    dataloader = DataLoader(dataset, 
-                            batch_size=batch_size, 
-                            shuffle=True if split == "train" else False,
-                            num_workers=nworkers,
-                            drop_last=True)
     
-    return dataloader
+    return dataset
 
 def __class_frequency(dataloader):
     label_frequency = np.zeros(len(dataloader.dataset.CLASSES), dtype=np.uint)

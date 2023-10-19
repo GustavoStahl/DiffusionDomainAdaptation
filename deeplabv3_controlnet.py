@@ -10,6 +10,7 @@ import numpy as np
 # deep learning
 import torch
 from torch import nn
+from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torchvision.transforms import Normalize, Resize, InterpolationMode
@@ -35,7 +36,7 @@ import matplotlib; matplotlib.use("Agg")
 from dataclasses import dataclass
 
 from torchvision.models.segmentation import deeplabv3_resnet101
-from deeplab.cityscapes_dataset import get_dataloader, ConditionType
+from deeplab.cityscapes_dataset import get_dataset, ConditionType
 
 device = None
 
@@ -439,21 +440,30 @@ def main(args):
     
     mean_and_std = ((0., 0., 0.), (1., 1., 1.)) # Set normalization in range (0,1)
     condition_type = ConditionType[args.condition_type]
-    train_dataloader = get_dataloader(args.dataset_path, 
-                                      split="train", 
-                                      batch_size=args.batch_size,
-                                      nworkers=args.nworkers,
-                                      filter_labels=args.filter_labels,
-                                      mean_and_std=mean_and_std,
-                                      first_n_samples=args.first_n_samples,
-                                      condition_type=condition_type)
-    test_dataloader = get_dataloader(args.dataset_path, 
-                                     split="val", 
-                                     batch_size=args.batch_size, 
-                                     nworkers=args.nworkers,
-                                     filter_labels=args.filter_labels,
-                                     mean_and_std=mean_and_std,
-                                     condition_type=condition_type)
+    
+    train_dataset = get_dataset(args.dataset_path, 
+                                split="train", 
+                                filter_labels=args.filter_labels,
+                                mean_and_std=mean_and_std,
+                                first_n_samples=args.first_n_samples,
+                                condition_type=condition_type)
+    test_dataset = get_dataset(args.dataset_path, 
+                               split="val", 
+                               filter_labels=args.filter_labels,
+                               mean_and_std=mean_and_std,
+                               first_n_samples=args.first_n_samples,
+                               condition_type=condition_type)
+    
+    train_dataloader = DataLoader(train_dataset, 
+                                  batch_size=args.batch_size, 
+                                  shuffle=True,
+                                  num_workers=args.nworkers,
+                                  drop_last=True)
+    test_dataloader = DataLoader(test_dataset, 
+                                 batch_size=args.batch_size, 
+                                 shuffle=False,
+                                 num_workers=args.nworkers,
+                                 drop_last=True)      
     
     scheduler_type = SchedulerType[args.scheduler]
     denoise_type = DenoiseType[args.denoise]

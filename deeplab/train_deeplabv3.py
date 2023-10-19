@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.utils.data import DataLoader, ConcatDataset
 from torch.optim import Adam, SGD
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -239,25 +240,73 @@ def main(args):
     
     set_determinism()
     
-    if DatasetType[args.dataset_type] == DatasetType.GTA5:
-        from gta_dataset import get_dataloader
-    elif DatasetType[args.dataset_type] == DatasetType.CITYSCAPES:
-        from cityscapes_dataset import get_dataloader
+    assert len(args.dataset_type) == len(args.dataset_path)
     
-    train_dataloader = get_dataloader(args.dataset_path, 
-                                      split="train", 
-                                      batch_size=args.batch_size,
-                                      nworkers=args.nworkers,
-                                      filter_labels=args.filter_labels)
-    test_dataloader = get_dataloader(args.dataset_path, 
-                                     split="val", 
-                                     batch_size=args.batch_size, 
-                                     nworkers=args.nworkers,
-                                     filter_labels=args.filter_labels)
+    mean_and_std = None
+    if len(args.dataset_path) >= 2:
+        if args.pretrained is None:
+            mean_and_std = [(0.485, 0.456, 0.406), 
+                            (0.229, 0.224, 0.225)] # Normalization IMAGENET
+        else:
+            #! Not ideal, needs to be manually set
+            #NOTE: Computed from GTA dataset
+            mean_and_std = [(0.42935305, 0.42347938, 0.40977437), 
+                            (0.25669742, 0.25097305, 0.24708469)]
+            #NOTE: Computed from Cityscapes dataset
+            # mean_and_std = [(0.28689553, 0.32513301, 0.28389176), 
+            #                 (0.18696375, 0.19017339, 0.18720214)]
     
-    num_classes = len(train_dataloader.dataset.CLASSES)
-    model = deeplabv3_resnet101(num_classes=num_classes, 
-                                weights_backbone=ResNet101_Weights.IMAGENET1K_V1)
+    test_dataset_list = []
+    train_dataset_list = []
+    for dataset_type, dataset_path in zip(args.dataset_type, args.dataset_path):
+        if DatasetType[dataset_type] == DatasetType.GTA5:
+            from gta_dataset import get_dataset
+        elif DatasetType[dataset_type] == DatasetType.CITYSCAPES:
+            from cityscapes_dataset import get_dataset
+        
+        train_dataset = get_dataset(dataset_path, 
+                                    split="train", 
+                                    filter_labels=args.filter_labels,
+                                    mean_and_std=mean_and_std)
+        test_dataset = get_dataset(dataset_path, 
+                                   split="val", 
+                                   filter_labels=args.filter_labels,
+                                   mean_and_std=mean_and_std)
+        
+        test_dataset_list.append(test_dataset)
+        train_dataset_list.append(train_dataset)
+    
+    test_dataset = ConcatDataset(test_dataset_list)
+    train_dataset = ConcatDataset(train_dataset_list)
+    
+    #NOTE: work around
+    test_dataset.CLASSES = test_dataset_list[0].CLASSES
+    test_dataset.VOID_IDX = test_dataset_list[0].VOID_IDX
+    
+    train_dataloader = DataLoader(train_dataset, 
+                                  batch_size=args.batch_size, 
+                                  shuffle=True,
+                                  num_workers=args.nworkers,
+                                  drop_last=True)
+    test_dataloader = DataLoader(test_dataset, 
+                                 batch_size=args.batch_size, 
+                                 shuffle=False,
+                                 num_workers=args.nworkers,
+                                 drop_last=True)   
+    
+    num_classes = len(train_dataset_list[0].CLASSES)
+    if args.pretrained is None:
+        model = deeplabv3_resnet101(num_classes=num_classes, 
+                                    weights_backbone=ResNet101_Weights.IMAGENET1K_V1)
+    else:
+        ckpt = torch.load(args.pretrained, map_location=device)
+        # load state dict
+        if isinstance(ckpt, dict):
+            model = deeplabv3_resnet101(num_classes=num_classes)
+            model.load_state_dict(ckpt["model"])
+        else:
+            model = ckpt    
+    
     # if torch.cuda.device_count() > 1:
     #     model = nn.DataParallel(model)
     model.to(device)
@@ -266,7 +315,7 @@ def main(args):
     optimizer = SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=1e-4)
     lr_scheduler = CosineAnnealingLR(optimizer, T_max=10)
     
-    class_weights = torch.tensor(train_dataloader.dataset.CLASS_WEIGHTS, device=device)
+    class_weights = torch.tensor(train_dataset_list[0].CLASS_WEIGHTS, device=device)
     criterion = nn.CrossEntropyLoss(weight=class_weights)
     
     wandb.init(project="Deeplabv3",
@@ -299,12 +348,17 @@ def parse_args():
     parser.add_argument("--dataset_path", 
                         required=True,
                         type=str,
-                        help="Path to the dataset.")
+                        nargs='*',
+                        help="Paths to the datasets.")
     parser.add_argument("--dataset_type", 
                         type=str,
-                        default=DatasetType.GTA5.name,
+                        nargs='*',
                         choices=DatasetType.options(), 
-                        help="Dataset to train with.")      
+                        help="Datasets to train with.")      
+    parser.add_argument("--pretrained", 
+                        type=str,
+                        default=None,
+                        help="Path to pretrained weights.")     
     parser.add_argument("--lr", 
                         default=1e-4,
                         type=float,

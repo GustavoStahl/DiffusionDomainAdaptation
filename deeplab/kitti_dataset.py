@@ -204,14 +204,21 @@ class KittiC19Dataset(Dataset):
         else:
             return image, label, condition
         
-def get_dataloader(dataset_path:str, 
-                   split:str="training", 
-                   batch_size:int=1, 
-                   nworkers:int=0, 
-                   filter_labels:bool=False,
-                   mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None,
-                   first_n_samples:int=None,
-                   condition_type:ConditionType=ConditionType.NONE):  
+        # data = {}
+        # data["image"] = image
+        # data["label"] = label  
+        # data["filepath"] = os.path.join(self.image_dir, self.image_filenames[index])
+        # if self.condition_type != ConditionType.NONE:
+        #     data["condition"] = condition  
+            
+        # return data        
+        
+def get_dataset(dataset_path:str, 
+                split:str="training", 
+                filter_labels:bool=False,
+                mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None,
+                first_n_samples:int=None,
+                condition_type:ConditionType=ConditionType.NONE):  
          
     if mean_and_std is None:
         mean = (0.5, 0.5, 0.5) #NOTE: computed from training dataset
@@ -237,12 +244,8 @@ def get_dataloader(dataset_path:str,
                               filter_labels=filter_labels,
                               first_n_samples=first_n_samples,
                               condition_type=condition_type)
-    dataloader = DataLoader(dataset, 
-                            batch_size=batch_size, 
-                            shuffle=False,#True if split == "train" else False,
-                            num_workers=nworkers,
-                            drop_last=True)   
-    return dataloader 
+   
+    return dataset 
 
 def __class_frequency(dataloader):
     label_frequency = np.zeros(len(dataloader.dataset.CLASSES), dtype=np.uint)

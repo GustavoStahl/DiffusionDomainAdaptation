@@ -8,6 +8,7 @@ import numpy as np
 
 # deep learning
 import torch
+from torch.utils.data import DataLoader
 from mmseg.core.evaluation.metrics import total_intersect_and_union, total_area_to_metrics
 from torchvision.transforms import Normalize
 
@@ -275,19 +276,23 @@ def main(args):
     set_determinism()
     
     if DatasetType[args.dataset_type] == DatasetType.CITYSCAPES:
-        from deeplab.cityscapes_dataset import get_dataloader, ConditionType
+        from deeplab.cityscapes_dataset import get_dataset, ConditionType
     elif DatasetType[args.dataset_type] == DatasetType.KITTI:
-        from deeplab.kitti_dataset import get_dataloader, ConditionType
+        from deeplab.kitti_dataset import get_dataset, ConditionType
     
     mean_and_std = ((0., 0., 0.), (1., 1., 1.)) # Set normalization in range (0,1)
     condition_type = ConditionType[args.condition_type]
-    test_dataloader = get_dataloader(args.dataset_path, 
-                                     split=args.dataset_split, 
-                                     batch_size=args.batch_size, 
-                                     nworkers=args.nworkers,
-                                     filter_labels=args.filter_labels,
-                                     mean_and_std=mean_and_std,
-                                     condition_type=condition_type)
+    test_dataset = get_dataset(args.dataset_path, 
+                               split=args.dataset_split, 
+                               filter_labels=args.filter_labels,
+                               mean_and_std=mean_and_std,
+                               condition_type=condition_type)
+    
+    test_dataloader = DataLoader(test_dataset, 
+                                 batch_size=args.batch_size, 
+                                 shuffle=False,
+                                 num_workers=args.nworkers,
+                                 drop_last=True)    
     
     scheduler_type = SchedulerType[args.scheduler]
     denoise_type = DenoiseType[args.denoise]

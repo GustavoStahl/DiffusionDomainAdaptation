@@ -4,6 +4,7 @@ from torchvision.models.segmentation import deeplabv3_resnet101
 
 # Typing
 from torch import nn
+from torch.utils.data import DataLoader
 from collections.abc import Iterable
 
 from mmseg.core.evaluation.metrics import total_intersect_and_union, total_area_to_metrics
@@ -124,6 +125,11 @@ def test(model:nn.Module,
     mean_accs = np.delete(mean_accs, void_idx)
     mean_ious = np.delete(mean_ious, void_idx)
     class_names = list(np.delete(np.array(class_names, dtype=object), void_idx))
+    
+    mean_acc, mean_iou = mean_accs.mean(), mean_ious.mean()
+    table = wandb.Table(data=[("mAcc", mean_acc), ("mIoU", mean_iou)], columns=["metric", "score"])
+    plot = wandb.plot.bar(table, label="metric", value="score", title="Mean metrics across classes")
+    wandb.log({"eval/metrics/mean_plot": plot}, step=epoch)        
         
     for class_name, acc, iou in zip(class_names, mean_accs, mean_ious):
         wandb.log({f"eval/metrics/acc/{class_name}": acc}, step=epoch)                
@@ -151,17 +157,21 @@ def main(args):
     set_determinism()
     
     if DatasetType[args.dataset_type] == DatasetType.GTA5:
-        from gta_dataset import get_dataloader
+        from gta_dataset import get_dataset
     elif DatasetType[args.dataset_type] == DatasetType.CITYSCAPES:
-        from cityscapes_dataset import get_dataloader
+        from cityscapes_dataset import get_dataset
     elif DatasetType[args.dataset_type] == DatasetType.KITTI:
-        from kitti_dataset import get_dataloader
+        from kitti_dataset import get_dataset
     
-    test_dataloader = get_dataloader(args.dataset_path, 
-                                     split=args.dataset_split, 
-                                     batch_size=args.batch_size, 
-                                     nworkers=args.nworkers,
-                                     filter_labels=args.filter_labels)
+    test_dataset = get_dataset(args.dataset_path, 
+                               split=args.dataset_split, 
+                               filter_labels=args.filter_labels)
+    
+    test_dataloader = DataLoader(test_dataset, 
+                                 batch_size=args.batch_size, 
+                                 shuffle=False,
+                                 num_workers=args.nworkers,
+                                 drop_last=True)       
 
     ckpt = torch.load(args.ckpt_path, map_location=device)
     # load state dict

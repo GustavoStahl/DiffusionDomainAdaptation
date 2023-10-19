@@ -211,14 +211,21 @@ class CityscapesC19Dataset(Cityscapes):
         else:
             return image, label, condition
         
-def get_dataloader(dataset_path:str, 
-                   split:str="train", 
-                   batch_size:int=1, 
-                   nworkers:int=0, 
-                   filter_labels:bool=False,
-                   mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None,
-                   first_n_samples:int=None,
-                   condition_type:ConditionType=ConditionType.NONE):  
+        # data = {}
+        # data["image"] = image
+        # data["label"] = label  
+        # data["filepath"] = self.images[index]
+        # if self.condition_type != ConditionType.NONE:
+        #     data["condition"] = condition  
+            
+        # return data
+        
+def get_dataset(dataset_path:str, 
+                split:str="train", 
+                filter_labels:bool=False,
+                mean_and_std:Tuple[Tuple[float,float,float], Tuple[float,float,float]]=None,
+                first_n_samples:int=None,
+                condition_type:ConditionType=ConditionType.NONE):  
          
     if mean_and_std is None:
         mean = (0.28689553, 0.32513301, 0.28389176) #NOTE: computed from training dataset
@@ -235,6 +242,12 @@ def get_dataloader(dataset_path:str,
                                     A.RandomCrop(*target_size, 
                                                  p=1.0),
                                     A.HorizontalFlip(p=0.5)])
+    else:
+        standard_size = (1046, 1914)
+        pair_transform = A.Compose([A.Resize(*standard_size, 
+                                             interpolation=cv2.INTER_LINEAR,
+                                             p=1.0)],
+                                   is_check_shapes=False)        
         
     transform = Compose([ToTensor(), 
                          Normalize(mean, std)])
@@ -248,12 +261,8 @@ def get_dataloader(dataset_path:str,
                                    filter_labels=filter_labels,
                                    first_n_samples=first_n_samples,
                                    condition_type=condition_type)
-    dataloader = DataLoader(dataset, 
-                            batch_size=batch_size, 
-                            shuffle=False,#True if split == "train" else False,
-                            num_workers=nworkers,
-                            drop_last=True)   
-    return dataloader 
+
+    return dataset 
 
 def __class_frequency(dataloader):
     label_frequency = np.zeros(len(dataloader.dataset.CLASSES), dtype=np.uint)
@@ -280,11 +289,9 @@ if __name__ == "__main__":
                                 batch_size=32,
                                 nworkers=8,
                                 condition_type=ConditionType.NONE)
-    label_frequency = __class_frequency(dataloader)
-    print(label_frequency)
-    exit(0)
     from tqdm import tqdm
     for data in tqdm(dataloader):
+        import pdb; pdb.set_trace()
         print(len(data))
         for i, d in enumerate(data):
             if i == 2:
