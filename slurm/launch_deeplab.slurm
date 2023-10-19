@@ -21,4 +21,14 @@ conda activate syn2real
 
 cd /home/stahlg/syn2real_sd/deeplab
 # python train_deeplabv3.py --dataset_path /ibex/user/stahlg/datasets/gta/prepared_dataset --dataset_type GTA5 --batch_size 16 --filter_labels --device cuda --lr 2.5e-3 --epochs 200 --nworkers 4 --exp gta_weighted_novoid_filterlabels_before_resize_SGD_lr2.5e-3_epochs200
-python train_deeplabv3.py --dataset_path /ibex/user/stahlg/datasets/cityscapes/ --dataset_type CITYSCAPES --batch_size 16 --device cuda --lr 2.5e-3 --epochs 200 --nworkers 4 --exp cityscapes_aug_SGD_lr2.5e-3_epochs200_with_crop
+# python train_deeplabv3.py --dataset_path /ibex/user/stahlg/datasets/cityscapes/ --dataset_type CITYSCAPES --batch_size 16 --device cuda --lr 2.5e-3 --epochs 200 --nworkers 4 --exp cityscapes_aug_SGD_lr2.5e-3_epochs200_with_crop
+python train_deeplabv3.py \
+ --dataset_path /ibex/user/stahlg/datasets/gta/prepared_dataset/ /ibex/user/stahlg/datasets/cityscapes_aug_canny/ \
+ --dataset_type GTA5 CITYSCAPES \
+ --pretrained wandb/run-20231004_185133-u2xfwaqc/files/weights/best.pth \
+ --batch_size 16 \
+ --device cuda \
+ --lr 2.5e-3 \
+ --epochs 200 \
+ --nworkers 4 \
+ --exp gta_and_cityscapes_cnet_weighted_canny_aug_SGD_lr2.5e-3_epochs200_finetuning_gta_weights
