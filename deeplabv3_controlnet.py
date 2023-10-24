@@ -357,8 +357,6 @@ def train(cnet_aug,
                                             
         #NOTE: this expects RGB
         diffusion_pred, denoise_loss, backward_helper = cnet_aug(image_rsz_norm, condition_rsz, prompt)
-        # ts.save(diffusion_pred, f"results/{cnet_aug.scheduler.__class__.__name__}_{cnet_aug.num_inference_steps}.png")
-        # import sys; sys.exit("Finishing...")
                                 
         diffusion_pred_rsz = deeplab_bilinear_resize(diffusion_pred)
         diffusion_pred_rsz_norm = deeplab_normalize(diffusion_pred_rsz)  
