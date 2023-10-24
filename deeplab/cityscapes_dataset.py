@@ -22,6 +22,8 @@ class ConditionType(Enum):
     NONE = auto()
     CANNY = auto()
     SAM = auto()
+    DEPTH = auto()
+    LINEART = auto()
     CANNY_AND_SAM = auto()
     
     @classmethod
@@ -127,15 +129,23 @@ class CityscapesC19Dataset(Cityscapes):
         
     def get_condition_files(self, condition_type):
         condition_files = []
-        if condition_type in [ConditionType.SAM, ConditionType.CANNY_AND_SAM]:
+        if condition_type in [ConditionType.SAM, 
+                              ConditionType.CANNY_AND_SAM, 
+                              ConditionType.DEPTH, 
+                              ConditionType.LINEART]:
             rgb_folder = "leftImg8bit"
-            sam_folder = "leftImg8bit_SAM"
+            if condition_type in [ConditionType.SAM, ConditionType.CANNY_AND_SAM]:
+                condition_folder = "leftImg8bit_SAM"
+            elif condition_type == ConditionType.DEPTH:
+                condition_folder = "leftImg8bit_depth"
+            elif condition_type == ConditionType.LINEART:
+                condition_folder = "leftImg8bit_lineart"
             
             for file_path in self.images:
                 dirname = os.path.dirname(file_path)
                 filename = os.path.basename(file_path)
-                sam_dirname = dirname.replace(rgb_folder, sam_folder)
-                condition_files.append(os.path.join(sam_dirname, filename))
+                condition_dirname = dirname.replace(rgb_folder, condition_folder)
+                condition_files.append(os.path.join(condition_dirname, filename))
         return condition_files
         
     def convert_labels_format(self, label):
@@ -157,6 +167,8 @@ class CityscapesC19Dataset(Cityscapes):
         condition = None
         if self.condition_type == ConditionType.SAM:
             condition = Image.open(self.condition_files[index])
+        elif self.condition_type in [ConditionType.DEPTH, ConditionType.LINEART]:
+            condition = Image.open(self.condition_files[index]).convert("L")
         elif self.condition_type == ConditionType.CANNY:
             image_bgr = np.array(image)[...,::-1]
             condition = Image.fromarray(cv2.Canny(image_bgr, 50, 100))   
